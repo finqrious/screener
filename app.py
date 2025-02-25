@@ -148,19 +148,28 @@ def main():
         st.title("Stock Document Downloader")
         st.markdown("##### Download transcripts, annual reports, and presentations for Indian stocks")
 
-    # Add API Key input section
-    api_key = st.text_input(
-        "Enter your Firecrawl API Key",
-        type="password",
-        help="Enter your Firecrawl API key. This is not stored anywhere.",
-        placeholder="fc-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    )
+    # Initialize with default API key
+    default_api_key = "fc-cc6afedddf66452ea64cacd5cc7dcadc"
+    
+    # Session state for API key management
+    if 'use_custom_key' not in st.session_state:
+        st.session_state.use_custom_key = False
 
-    if not api_key:
-        st.warning("Please enter your Firecrawl API key to continue")
-        return
+    # Show custom API key input if needed
+    if st.session_state.use_custom_key:
+        api_key = st.text_input(
+            "Enter your Firecrawl API Key",
+            type="password",
+            help="Default API limit reached. Please enter your own Firecrawl API key.",
+            placeholder="fc-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        )
+        if not api_key:
+            st.warning("Please enter your Firecrawl API key to continue")
+            return
+    else:
+        api_key = default_api_key
 
-    # Initialize FireCrawl API with user's key
+    # Initialize FireCrawl API
     app = FirecrawlApp(api_key=api_key)
 
     # Main content in a card-like container
@@ -185,6 +194,15 @@ def main():
                         url=f'https://www.screener.in/company/{stock_symbol}/consolidated/#documents',
                         params={'formats': ['markdown']}
                     )
+
+                    # Check for API limit error
+                    if isinstance(scrape_result, dict) and scrape_result.get('error'):
+                        error_msg = str(scrape_result.get('error', '')).lower()
+                        if 'limit' in error_msg or 'quota' in error_msg:
+                            st.error("⚠️ Default API key limit reached. Please use your own API key.")
+                            st.session_state.use_custom_key = True
+                            st.experimental_rerun()
+                            return
 
                     markdown_content = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
                     if not markdown_content:
@@ -224,4 +242,3 @@ def main():
     )
 if __name__ == "__main__":
     main()
-##
