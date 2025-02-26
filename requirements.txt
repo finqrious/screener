@@ -1,4 +1,5 @@
 streamlit
 requests
-firecrawl
 python-dotenv
+beautifulsoup4 
+html2text
