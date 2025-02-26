@@ -31,11 +31,11 @@ def scrape_to_markdown(url):
         return {"error": str(e)}
 
 def extract_document_links(markdown):
-    """Extracts transcript, annual report, and PPT PDF links from markdown content with dates."""
+    """Extracts transcript, annual report, and PPT PDF links from markdown content."""
     doc_types = {
-        "transcripts": {"section": "### Concalls", "links": [], "dates": []},
-        "annual_reports": {"section": "### Annual reports", "links": [], "dates": []},
-        "ppts": {"section": "### PPTs", "links": [], "dates": []},
+        "transcripts": {"section": "### Concalls", "links": []},
+        "annual_reports": {"section": "### Annual reports", "links": []},
+        "ppts": {"section": "### PPTs", "links": []},
     }
 
     lines = markdown.split("\n")
@@ -48,16 +48,11 @@ def extract_document_links(markdown):
                 continue
 
         if current_section and "http" in line:
-            # Extract date from the line (usually in format like "31 Dec 2023" or "2023-24")
-            date_match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}|\d{4}-\d{2})', line)
-            date = date_match.group(1) if date_match else "Date not found"
-            
-            url_match = re.search(r'https?://[^\s)]+\.pdf', line)
-            if url_match:
-                doc_types[current_section]["links"].append(url_match.group())
-                doc_types[current_section]["dates"].append(date)
+            match = re.search(r'https?://[^\s)]+\.pdf', line)
+            if match:
+                doc_types[current_section]["links"].append(match.group())
 
-    return {key: {"links": value["links"], "dates": value["dates"]} for key, value in doc_types.items()}
+    return {key: value["links"] for key, value in doc_types.items()}
 
 def download_pdfs(document_data, stock_symbol):
     """Downloads PDFs for transcripts, annual reports, and PPTs into a zip file."""
@@ -65,7 +60,7 @@ def download_pdfs(document_data, stock_symbol):
     os.makedirs(pdf_folder, exist_ok=True)
 
     pdf_files = []
-    total_files = sum(len(data["links"]) for data in document_data.values())
+    total_files = sum(len(files) for files in document_data.values())
     downloaded_count = 0
 
     progress_bar = st.progress(0)
@@ -197,12 +192,9 @@ def main():
                     
                     if total_docs > 0:
                         st.success(f"Found {total_docs} documents:")
-                        for doc_type, data in doc_links.items():
-                            if data["links"]:
-                                st.markdown(f"#### {doc_type.replace('_', ' ').title()}")
-                                for link, date in zip(data["links"], data["dates"]):
-                                    filename = link.split('/')[-1][:30] + "..." if len(link.split('/')[-1]) > 30 else link.split('/')[-1]
-                                    st.markdown(f"- [{filename}]({link}) ({date})")
+                        for doc_type, links in doc_links.items():
+                            if links:
+                                st.markdown(f"- {doc_type.replace('_', ' ').title()}: {len(links)} files")
                         
                         # Direct download without confirmation
                         zip_file = download_pdfs(doc_links, stock_symbol)
