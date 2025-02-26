@@ -71,11 +71,9 @@ def download_pdfs(document_data, stock_symbol):
     temp_dir = os.path.join(pdf_folder, stock_symbol)
     os.makedirs(temp_dir, exist_ok=True)
 
-    for doc_type, data in document_data.items():
-        for index, (url, date) in enumerate(zip(data["links"], data["dates"])):
-            # Create a filename with date
-            date_str = re.sub(r'[^\w\-]', '_', date)  # Clean date string for filename
-            filename = os.path.join(temp_dir, f"{stock_symbol}_{doc_type}_{date_str}_{index+1}.pdf")
+    for doc_type, links in document_data.items():
+        for index, url in enumerate(links):
+            filename = os.path.join(temp_dir, f"{stock_symbol}_{doc_type}_{index+1}.pdf")
 
             headers = {
                 "User-Agent": "Mozilla/5.0",
