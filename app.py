@@ -8,14 +8,27 @@ import time
 import requests
 import zipfile
 import streamlit as st
-from firecrawl import FirecrawlApp
+from bs4 import BeautifulSoup
+import html2text
 
-# Remove these lines completely
-# Load API Key from Environment Variables
-
-
-# Remove this line
-# app = FirecrawlApp(api_key=API_KEY)
+def scrape_to_markdown(url):
+    """Scrapes webpage and converts to markdown format."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': 'https://www.screener.in'
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            converter = html2text.HTML2Text()
+            converter.ignore_links = False
+            markdown_text = converter.handle(str(soup))
+            return {"markdown": markdown_text}
+        else:
+            return {"error": f"Failed to retrieve page. Status code: {response.status_code}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 def extract_document_links(markdown):
     """Extracts transcript, annual report, and PPT PDF links from markdown content."""
@@ -108,9 +121,6 @@ def download_pdfs(document_data, stock_symbol):
         return zip_filename
     return None
 
-# Remove the API_KEY and app initialization from here
-# Initialize FireCrawl API will be moved inside main function
-
 def main():
     # Configure the page
     st.set_page_config(
@@ -148,30 +158,6 @@ def main():
         st.title("Stock Document Downloader")
         st.markdown("##### Download transcripts, annual reports, and presentations for Indian stocks")
 
-    # Initialize with default API key
-    default_api_key = "fc-cc6afedddf66452ea64cacd5cc7dcadc"
-    
-    # Session state for API key management
-    if 'use_custom_key' not in st.session_state:
-        st.session_state.use_custom_key = False
-
-    # Show custom API key input if needed
-    if st.session_state.use_custom_key:
-        api_key = st.text_input(
-            "Enter your Firecrawl API Key",
-            type="password",
-            help="Default API limit reached. Please enter your own Firecrawl API key.",
-            placeholder="fc-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        )
-        if not api_key:
-            st.warning("Please enter your Firecrawl API key to continue")
-            return
-    else:
-        api_key = default_api_key
-
-    # Initialize FireCrawl API
-    app = FirecrawlApp(api_key=api_key)
-
     # Main content in a card-like container
     with st.container():
         st.markdown("---")
@@ -190,21 +176,10 @@ def main():
         if search_button and stock_symbol:
             try:
                 with st.spinner(f"🔍 Searching for {stock_symbol}..."):
-                    scrape_result = app.scrape_url(
-                        url=f'https://www.screener.in/company/{stock_symbol}/consolidated/#documents',
-                        params={'formats': ['markdown']}
-                    )
+                    url = f'https://www.screener.in/company/{stock_symbol}/consolidated/#documents'
+                    scrape_result = scrape_to_markdown(url)
 
-                    # Check for API limit error
-                    if isinstance(scrape_result, dict) and scrape_result.get('error'):
-                        error_msg = str(scrape_result.get('error', '')).lower()
-                        if 'limit' in error_msg or 'quota' in error_msg:
-                            st.error("⚠️ Default API key limit reached. Please use your own API key.")
-                            st.session_state.use_custom_key = True
-                            st.experimental_rerun()
-                            return
-
-                    markdown_content = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
+                    markdown_content = scrape_result.get("markdown", "")
                     if not markdown_content:
                         st.error("⚠️ No data found!")
                         return
