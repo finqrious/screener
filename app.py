@@ -145,19 +145,18 @@ def main():
     def close_about():
         st.session_state.show_about = False
         st.rerun()
-    
     # Add About button and modal
     with st.container():
-        col1, col2 = st.columns([6, 1])
-        with col2:
-            if st.button("About", type="secondary"):
+        # Create a right-aligned container for buttons
+        _, right_col = st.columns([3, 1])  # Adjusted ratio to give more space for buttons
+        with right_col:
+            if st.button("About", type="secondary", use_container_width=True):
                 st.session_state.show_about = True
+            if st.session_state.show_about:
+                if st.button("Close", type="secondary", key="close_button", use_container_width=True):
+                    close_about()
         
         if st.session_state.show_about:
-            # Add a single close button
-            if st.button("Close About", key="close_button"):
-                close_about()
-            
             st.markdown("""
                 <style>
                     .about-panel {
@@ -189,8 +188,9 @@ def main():
                         <ol style='margin-left: 20px; font-size: 1.1em; line-height: 1.6;'>
                             <li>Enter stock name (Example: TATAMOTORS, HDFCBANK)</li>
                             <li>Select documents you want to download</li>
-                            <li>Get your ZIP file with all documents</li>
-                            <li>Upload these docs to NotebookLLM</li>
+                            <li>Avoid the hassle of downloading documents one by one from screener</li>
+                            <li>Get your ZIP file with all documents in single click</li>
+                            <li>Upload these docs to NotebookLLM easily</li>   
                             <li>Ask questions like:
                                 <ul style='margin: 10px 0;'>
                                     <li>"What's the company's business model?"</li>
@@ -233,7 +233,7 @@ def main():
             with col2:
                 transcripts = st.checkbox("Concall Transcripts 📝", value=True)
             with col3:
-                ppts = st.checkbox("Presentation PPTs 📊", value=True)
+                ppts = st.checkbox("Presentations 📊", value=True)
             
             submit_button = st.form_submit_button(label="🔍 Fetch Documents")
     
