@@ -140,11 +140,6 @@ def main():
     # Initialize session state for About modal
     if 'show_about' not in st.session_state:
         st.session_state.show_about = False
-    
-    # Function to close the About panel
-    def close_about():
-        st.session_state.show_about = False
-        st.rerun()
     # Add About button and modal
     with st.container():
         # Create a right-aligned container for buttons
@@ -152,62 +147,32 @@ def main():
         with right_col:
             if st.button("About", type="secondary", use_container_width=True):
                 st.session_state.show_about = True
-            if st.session_state.show_about:
-                if st.button("Close", type="secondary", key="close_button", use_container_width=True):
-                    close_about()
         
         if st.session_state.show_about:
-            st.markdown("""
-                <style>
-                    .about-panel {
-                        position: fixed;
-                        top: 0;
-                        left: 0;
-                        height: 100vh;
-                        width: 450px;
-                        background-color: white;
-                        z-index: 1000;
-                        box-shadow: 2px 0 10px rgba(0,0,0,0.1);
-                        padding: 20px;
-                        overflow-y: auto;
-                        border-right: 1px solid #e5e5e5;
-                        animation: slideIn 0.3s ease-out;
-                    }
-                    @keyframes slideIn {
-                        from { transform: translateX(-100%); }
-                        to { transform: translateX(0); }
-                    }
-                </style>
-                <div class='about-panel'>
-                    <h2 style='text-align: center; color: #1f77b4; margin-top: 40px;'>About StockLib 📚</h2>
-                    <p style='text-align: center; color: #666666; font-style: italic; margin: 10px 0 20px;'>
-                        StockLib + NotebookLLM = Your AI-Powered Business Analyst
-                    </p>
-                    <div style='background-color: #f8f9fa; padding: 25px; border-radius: 8px; margin: 20px 0; border: 1px solid #e5e5e5;'>
-                        <h4>Quick Guide:</h4>
-                        <ol style='margin-left: 20px; font-size: 1.1em; line-height: 1.6;'>
-                            <li>Enter stock name (Example: TATAMOTORS, HDFCBANK)</li>
-                            <li>Select documents you want to download</li>
-                            <li>Avoid the hassle of downloading documents one by one from screener</li>
-                            <li>Get your ZIP file with all documents in single click</li>
-                            <li>Upload these docs to NotebookLLM easily</li>   
-                            <li>Ask questions like:
-                                <ul style='margin: 10px 0;'>
-                                    <li>"What's the company's business model?"</li>
-                                    <li>"Explain their growth strategy"</li>
-                                    <li>"What are their key products?"</li>
-                                </ul>
-                            </li>
-                            <li>Get instant insights from years of business data! 🚀</li>
-                        </ol>
-                    </div>
-                    <p style='text-align: center; font-size: 0.8em; color: #666666; margin-top: 20px; 
-                        padding-top: 15px; border-top: 1px solid #eee;'>
-                        Note: All documents belong to BSE/NSE/respective companies and are fetched from screener.in
-                    </p>
-                </div>
-            """, unsafe_allow_html=True)
-    
+            # Use Streamlit's native components instead of custom HTML/CSS
+            st.subheader("About StockLib 📚")
+            st.caption("StockLib + NotebookLLM = Your AI-Powered Business Analyst")
+            
+            with st.expander("Quick Guide", expanded=True):
+                st.markdown("""
+                1. Enter stock name (Example: TATAMOTORS, HDFCBANK)
+                2. Select documents you want to download
+                3. Avoid the hassle of downloading documents one by one from screener
+                4. Get your ZIP file with all documents in single click
+                5. Upload these docs to NotebookLLM easily
+                6. Ask questions like:
+                   - "What's the company's business model?"
+                   - "Explain their growth strategy"
+                   - "What are their key products?"
+                7. Get instant insights from years of business data! 🚀
+                """)
+            
+            st.caption("Note: All documents belong to BSE/NSE/respective companies and are fetched from screener.in")
+            
+            # Standard Streamlit close button
+            if st.button("Close", key="close_about_button"):
+                st.session_state.show_about = False
+                st.rerun()
     # Improved header styling
     st.markdown("""
         <h1 style='text-align: center;'>StockLib 📚</h1>
