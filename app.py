@@ -83,7 +83,7 @@ def format_filename(date_str, doc_type):
 def download_pdf(url, folder_path, file_name):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, stream=True, timeout=30)
+        response = requests.get(url, headers=headers, stream=True, timeout=40)
         response.raise_for_status()
 
         file_path = os.path.join(folder_path, file_name)
