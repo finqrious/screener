@@ -1,244 +1,324 @@
-# Stock Transcript Downloader
-# Author: Your Name
-# -----------------------------------------
-
-import os
-import re
-import time
 import requests
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime
+import os
 import zipfile
+import time
+import urllib.parse
 import streamlit as st
-from firecrawl import FirecrawlApp
+import base64
+import io
 
-# Remove these lines completely
-# Load API Key from Environment Variables
+def get_webpage_content(stock_name):
+    url = f"https://www.screener.in/company/{stock_name}/consolidated/#documents"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        if "404" in str(e):
+            st.error(f"Stock '{stock_name}' not found. Please check the ticker symbol.")
+        elif "Connection" in str(e):
+            st.error("Unable to connect. Please check your internet connection.")
+        else:
+            st.error(f"Error: Unable to fetch data for '{stock_name}'. Please try again later.")
+        return None
 
+def parse_html_content(html_content):
+    if not html_content:
+        return []
+        
+    soup = BeautifulSoup(html_content, 'html.parser')
 
-# Remove this line
-# app = FirecrawlApp(api_key=API_KEY)
+    all_links = []
+    
+    # Annual Reports
+    annual_reports = soup.select('.annual-reports ul.list-links li a')
+    for link in annual_reports:
+        year = re.search(r'Financial Year (\d{4})', link.text.strip())
+        if year:
+            all_links.append({'date': year.group(1), 'type': 'Annual_Report', 'url': link['href']})
 
-def extract_document_links(markdown):
-    """Extracts transcript, annual report, and PPT PDF links from markdown content."""
-    doc_types = {
-        "transcripts": {"section": "### Concalls", "links": []},
-        "annual_reports": {"section": "### Annual reports", "links": []},
-        "ppts": {"section": "### PPTs", "links": []},
-    }
+    # Concall Transcripts and PPTs
+    concall_items = soup.select('.concalls ul.list-links li')
+    for item in concall_items:
+        date_div = item.select_one('.ink-600.font-size-15')
+        if date_div:
+            date_text = date_div.text.strip()
+            try:
+                date_obj = datetime.strptime(date_text, '%b %Y')
+                date = date_obj.strftime('%Y-%m')
+            except:
+                date = date_text
+                
+            for link in item.find_all('a', class_='concall-link'):
+                if 'Transcript' in link.text:
+                    all_links.append({'date': date, 'type': 'Transcript', 'url': link['href']})
+                elif 'PPT' in link.text:
+                    all_links.append({'date': date, 'type': 'PPT', 'url': link['href']})
 
-    lines = markdown.split("\n")
-    current_section = None
+    return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
-    for line in lines:
-        for doc_type, details in doc_types.items():
-            if details["section"] in line:
-                current_section = doc_type
+def format_filename(date_str, doc_type):
+    # If date is just a year (e.g., "2023")
+    if re.match(r'^\d{4}$', date_str):
+        return f"{date_str}_{doc_type}.pdf"
+    
+    # If date is in YYYY-MM format
+    if re.match(r'^\d{4}-\d{2}$', date_str):
+        year, month = date_str.split('-')
+        return f"{year}_{month}_{doc_type}.pdf"
+    
+    # If date is in DD/MM/YYYY format, convert to YYYY_MM_DD
+    if re.match(r'^\d{2}/\d{2}/\d{4}$', date_str):
+        day, month, year = date_str.split('/')
+        return f"{year}_{month}_{day}_{doc_type}.pdf"
+    
+    # For any other format, just replace spaces and slashes with underscores
+    clean_date = date_str.replace(' ', '_').replace('/', '_')
+    return f"{clean_date}_{doc_type}.pdf"
+
+def download_pdf(url, folder_path, file_name):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
+        response.raise_for_status()
+
+        file_path = os.path.join(folder_path, file_name)
+        content = response.content  # Store content before writing to file
+        
+        with open(file_path, 'wb') as file:
+            file.write(content)
+
+        return file_path, content
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error downloading {url}: {e}")
+        return None, None
+
+def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text):
+    os.makedirs(output_folder, exist_ok=True)
+    successful_downloads = []
+    file_contents = {}
+    
+    total_files = sum(1 for link in links if link['type'] in doc_types)
+    progress_step = 1.0 / total_files if total_files > 0 else 0
+    current_progress = 0.0
+    downloaded_count = 0
+    
+    for link in links:
+        if link['type'] in doc_types:
+            try:
+                file_name = format_filename(link['date'], link['type'])
+                file_path, content = download_pdf(link['url'], output_folder, file_name)
+                if file_path:
+                    successful_downloads.append(file_path)
+                    file_contents[file_name] = content
+                    downloaded_count += 1
+                current_progress += progress_step
+                progress_bar.progress(min(current_progress, 1.0))
+                status_text.text(f"Downloading: {downloaded_count}/{total_files} documents")
+                time.sleep(1)
+            except Exception as e:
+                st.warning(f"Skipped {link['date']}_{link['type']}: {str(e)}")
                 continue
 
-        if current_section and "http" in line:
-            match = re.search(r'https?://[^\s)]+\.pdf', line)
-            if match:
-                doc_types[current_section]["links"].append(match.group())
+    return successful_downloads, file_contents
 
-    return {key: value["links"] for key, value in doc_types.items()}
-
-def download_pdfs(document_data, stock_symbol):
-    """Downloads PDFs for transcripts, annual reports, and PPTs into a zip file."""
-    pdf_folder = "downloaded_documents"
-    os.makedirs(pdf_folder, exist_ok=True)
-
-    pdf_files = []
-    total_files = sum(len(files) for files in document_data.values())
-    downloaded_count = 0
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    status_text.text(f"Downloading documents for {stock_symbol}...")
-
-    # Create a temporary directory for downloads
-    temp_dir = os.path.join(pdf_folder, stock_symbol)
-    os.makedirs(temp_dir, exist_ok=True)
-
-    for doc_type, links in document_data.items():
-        for index, url in enumerate(links):
-            filename = os.path.join(temp_dir, f"{stock_symbol}_{doc_type}_{index+1}.pdf")
-
-            headers = {
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://nseindia.com" if "nseindia" in url else "https://bseindia.com"
-            }
-
-            try:
-                response = requests.get(url, headers=headers, stream=True, timeout=50)
-                if response.status_code == 200:
-                    with open(filename, "wb") as file:
-                        file.write(response.content)
-                    pdf_files.append(filename)
-                    downloaded_count += 1
-                    progress_bar.progress(downloaded_count / total_files)
-                else:
-                    st.error(f"Failed to download {url}")
-            except Exception as e:
-                st.error(f"Error downloading {url}: {e}")
-
-            time.sleep(0.5)
-
-    if pdf_files:
-        zip_filename = f"{stock_symbol}_documents.zip"
-        zip_path = os.path.join(pdf_folder, zip_filename)
-        with zipfile.ZipFile(zip_path, "w") as zipf:
-            for file in pdf_files:
-                zipf.write(file, os.path.basename(file))
-        
-        # Read the ZIP file and create download button
-        with open(zip_path, "rb") as f:
-            st.download_button(
-                label=f"⬇️ Download {stock_symbol} Documents (ZIP)",
-                data=f,
-                file_name=zip_filename,
-                mime="application/zip"
-            )
-        
-        status_text.text(f"✓ Downloaded {downloaded_count}/{total_files} PDFs.")
-        
-        # Clean up temporary files
-        for file in pdf_files:
-            os.remove(file)
-        os.rmdir(temp_dir)
-        
-        return zip_filename
-    return None
-
-# Remove the API_KEY and app initialization from here
-# Initialize FireCrawl API will be moved inside main function
-
-def main():
-    # Configure the page
-    st.set_page_config(
-        page_title="Stock Document Downloader",
-        page_icon="📊",
-        layout="wide"
-    )
-
-    # Custom CSS for better styling
-    st.markdown("""
-        <style>
-        .main {
-            padding: 2rem;
-        }
-        .stButton>button {
-            width: 100%;
-            background-color: #FF4B4B;
-            color: white;
-        }
-        .stButton>button:hover {
-            background-color: #FF6B6B;
-            color: white;
-        }
-        #GithubIcon {
-            visibility: hidden;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-    # Header section with logo and title
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        st.image("https://cdn-icons-png.flaticon.com/512/6941/6941697.png", width=100)
-    with col2:
-        st.title("Stock Document Downloader")
-        st.markdown("##### Download transcripts, annual reports, and presentations for Indian stocks")
-
-    # Initialize with default API key
-    default_api_key = "fc-cc6afedddf66452ea64cacd5cc7dcadc"
+def create_zip_in_memory(file_contents):
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for file_name, content in file_contents.items():
+            zipf.writestr(file_name, content)
     
-    # Session state for API key management
-    if 'use_custom_key' not in st.session_state:
-        st.session_state.use_custom_key = False
-
-    # Show custom API key input if needed
-    if st.session_state.use_custom_key:
-        api_key = st.text_input(
-            "Enter your Firecrawl API Key",
-            type="password",
-            help="Default API limit reached. Please enter your own Firecrawl API key.",
-            placeholder="fc-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        )
-        if not api_key:
-            st.warning("Please enter your Firecrawl API key to continue")
-            return
-    else:
-        api_key = default_api_key
-
-    # Initialize FireCrawl API
-    app = FirecrawlApp(api_key=api_key)
-
-    # Main content in a card-like container
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()  # Return the bytes directly
+def main():
+    st.set_page_config(page_title="StockLib", page_icon="📚")
+    
+    # Initialize session state for About modal
+    if 'show_about' not in st.session_state:
+        st.session_state.show_about = False
+    
+    # Function to close the About panel
+    def close_about():
+        st.session_state.show_about = False
+        st.rerun()
+    
+    # Add About button and modal
     with st.container():
-        st.markdown("---")
-        
-        # Input section
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            stock_symbol = st.text_input(
-                "Enter Stock Symbol",
-                placeholder="e.g., HDFCBANK, INFY, RELIANCE",
-                help="Enter the stock symbol as listed on NSE/BSE"
-            ).strip().upper()
+        col1, col2 = st.columns([6, 1])
         with col2:
-            st.markdown("<br>", unsafe_allow_html=True)  # Add spacing
-            search_button = st.button("🔍 Search Documents", use_container_width=True)
-        if search_button and stock_symbol:
-            try:
-                with st.spinner(f"🔍 Searching for {stock_symbol}..."):
-                    scrape_result = app.scrape_url(
-                        url=f'https://www.screener.in/company/{stock_symbol}/consolidated/#documents',
-                        params={'formats': ['markdown']}
-                    )
-
-                    # Check for API limit error
-                    if isinstance(scrape_result, dict) and scrape_result.get('error'):
-                        error_msg = str(scrape_result.get('error', '')).lower()
-                        if 'limit' in error_msg or 'quota' in error_msg:
-                            st.error("⚠️ Default API key limit reached. Please use your own API key.")
-                            st.session_state.use_custom_key = True
-                            st.experimental_rerun()
-                            return
-
-                    markdown_content = scrape_result.get("markdown", "") if isinstance(scrape_result, dict) else ""
-                    if not markdown_content:
-                        st.error("⚠️ No data found!")
+            if st.button("About", type="secondary"):
+                st.session_state.show_about = True
+        
+        if st.session_state.show_about:
+            # Add a single close button
+            if st.button("Close About", key="close_button"):
+                close_about()
+            
+            st.markdown("""
+                <style>
+                    .about-panel {
+                        position: fixed;
+                        top: 0;
+                        left: 0;
+                        height: 100vh;
+                        width: 450px;
+                        background-color: white;
+                        z-index: 1000;
+                        box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+                        padding: 20px;
+                        overflow-y: auto;
+                        border-right: 1px solid #e5e5e5;
+                        animation: slideIn 0.3s ease-out;
+                    }
+                    @keyframes slideIn {
+                        from { transform: translateX(-100%); }
+                        to { transform: translateX(0); }
+                    }
+                </style>
+                <div class='about-panel'>
+                    <h2 style='text-align: center; color: #1f77b4; margin-top: 40px;'>About StockLib 📚</h2>
+                    <p style='text-align: center; color: #666666; font-style: italic; margin: 10px 0 20px;'>
+                        StockLib + NotebookLLM = Your AI-Powered Business Analyst
+                    </p>
+                    <div style='background-color: #f8f9fa; padding: 25px; border-radius: 8px; margin: 20px 0; border: 1px solid #e5e5e5;'>
+                        <h4>Quick Guide:</h4>
+                        <ol style='margin-left: 20px; font-size: 1.1em; line-height: 1.6;'>
+                            <li>Enter stock name (Example: TATAMOTORS, HDFCBANK)</li>
+                            <li>Select documents you want to download</li>
+                            <li>Get your ZIP file with all documents</li>
+                            <li>Upload these docs to NotebookLLM</li>
+                            <li>Ask questions like:
+                                <ul style='margin: 10px 0;'>
+                                    <li>"What's the company's business model?"</li>
+                                    <li>"Explain their growth strategy"</li>
+                                    <li>"What are their key products?"</li>
+                                </ul>
+                            </li>
+                            <li>Get instant insights from years of business data! 🚀</li>
+                        </ol>
+                    </div>
+                    <p style='text-align: center; font-size: 0.8em; color: #666666; margin-top: 20px; 
+                        padding-top: 15px; border-top: 1px solid #eee;'>
+                        Note: All documents belong to BSE/NSE/respective companies and are fetched from screener.in
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
+    
+    # Improved header styling
+    st.markdown("""
+        <h1 style='text-align: center;'>StockLib 📚</h1>
+        <h4 style='text-align: center; color: #666666;'>Your First Step in Fundamental Analysis – Your Business Data Library!</h4>
+        <hr>
+    """, unsafe_allow_html=True)
+    
+    # Create a container for the main content
+    main_container = st.container()
+    
+    # Create a container for the footer
+    footer_container = st.container()
+    
+    with main_container:
+        # Add form with improved styling
+        with st.form(key='stock_form'):
+            stock_name = st.text_input("Enter the stock name (BSE/NSE ticker):", placeholder="Example: TATAMOTORS")
+            
+            st.markdown("### Select Document Types")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                annual_reports = st.checkbox("Annual Reports 📄", value=True)
+            with col2:
+                transcripts = st.checkbox("Concall Transcripts 📝", value=True)
+            with col3:
+                ppts = st.checkbox("Presentation PPTs 📊", value=True)
+            
+            submit_button = st.form_submit_button(label="🔍 Fetch Documents")
+    
+        # Process form submission
+        if submit_button and stock_name:
+            doc_types = []
+            if annual_reports:
+                doc_types.append("Annual_Report")
+            if transcripts:
+                doc_types.append("Transcript")
+            if ppts:
+                doc_types.append("PPT")
+            
+            if not doc_types:
+                st.warning("No document types selected.")
+                return
+            
+            with st.spinner("🔍 Searching for documents..."):
+                html_content = get_webpage_content(stock_name)
+                
+                if not html_content:
+                    st.error("Failed to fetch webpage content. Please check the stock ticker and try again.")
+                    return
+                
+                try:
+                    links = parse_html_content(html_content)
+                    if not links:
+                        st.warning("📭 No documents found for this stock.")
                         return
-
-                    # Show document summary
-                    doc_links = extract_document_links(markdown_content)
-                    total_docs = sum(len(links) for links in doc_links.values())
                     
-                    if total_docs > 0:
-                        st.success(f"Found {total_docs} documents:")
-                        for doc_type, links in doc_links.items():
-                            if links:
-                                st.markdown(f"- {doc_type.replace('_', ' ').title()}: {len(links)} files")
+                    filtered_links = [link for link in links if link['type'] in doc_types]
+                    if not filtered_links:
+                        st.warning("📭 No documents found for the selected types.")
+                        return
+                    
+                    # Create containers for different states
+                    progress_container = st.container()
+                    download_container = st.container()
+                    
+                    with progress_container:
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
                         
-                        # Direct download without confirmation
-                        zip_file = download_pdfs(doc_links, stock_symbol)
-                        if not zip_file:
-                            st.warning("No documents were downloaded.")
+                    pdf_folder = f"{stock_name}_documents"
+                    downloaded_files, file_contents = download_selected_documents(
+                        filtered_links, pdf_folder, doc_types, progress_bar, status_text
+                    )
+                    # Clear the searching spinner
+                    st.spinner(None)
+                    # Add Twitter contact link at the bottom
+                    st.markdown("<br><br><hr>", unsafe_allow_html=True)
+                    st.markdown(
+                        '<div style="text-align: center; padding: 10px; color: #666666;">'
+                        'For any query please contact: '
+                        '<a href="https://x.com/PatilInvests" target="_blank">@patilinvests</a>'
+                        '</div>',
+                        unsafe_allow_html=True
+                    )
+                    if downloaded_files:
+                        progress_bar.progress(1.0)
+                        status_text.success(f"✅ Downloaded {len(downloaded_files)} out of {len(filtered_links)} documents")
+                        
+                        with download_container:
+                            zip_data = create_zip_in_memory(file_contents)
+                            st.download_button(
+                                label="📦 Download All Documents as ZIP",
+                                data=zip_data,
+                                file_name=f"{stock_name}_documents.zip",
+                                mime="application/zip",
+                                key="download_button"
+                            )
                     else:
-                        st.warning("No documents found for this stock.")
-
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        """
-        <div style='text-align: center'>
-            <p style='color: #666666; font-size: 0.8em;'>
-                Made with ❤️ for Indian Stock Market Investors
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+                        st.error("❌ No files could be downloaded.")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
+    # Add Twitter contact link in the footer container
+    with footer_container:
+        st.markdown("""
+            <div style="position: fixed; bottom: 0; left: 0; right: 0; background-color: white; padding: 10px; border-top: 1px solid #e5e5e5;">
+                <div style="text-align: center; color: #666666;">
+                    For any query please contact: 
+                    <a href="https://x.com/PatilInvests" target="_blank" style="color: #1DA1F2; text-decoration: none;">@patilinvests</a>
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 if __name__ == "__main__":
     main()
