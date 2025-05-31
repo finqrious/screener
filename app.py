@@ -19,7 +19,15 @@ import io
 def get_webpage_content(stock_name):
     url = f"https://www.screener.in/company/{stock_name}/consolidated/#documents"
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Referer": "https://www.screener.in/",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+    "Connection": "keep-alive"
+        }
+        
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         return response.text
