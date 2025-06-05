@@ -82,8 +82,26 @@ def format_filename(date_str, doc_type):
 
 def download_pdf(url, folder_path, file_name):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, stream=True, timeout=50)
+        # More comprehensive browser-like headers
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://www.screener.in/",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+        
+        # Create a session to maintain cookies
+        session = requests.Session()
+        
+        # First, make a GET request to the BSE homepage to get cookies
+        if "bseindia.com" in url:
+            session.get("https://www.bseindia.com/", headers=headers)
+            
+        # Now make the actual request for the PDF
+        response = session.get(url, headers=headers, stream=True, timeout=50)
         response.raise_for_status()
 
         file_path = os.path.join(folder_path, file_name)
