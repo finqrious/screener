@@ -87,22 +87,51 @@ def download_pdf(url, folder_path, file_name):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
-            "Referer": "https://www.screener.in/",
+            "Referer": "https://www.bseindia.com/",
             "DNT": "1",
             "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
+            "Upgrade-Insecure-Requests": "1",
+            "Cache-Control": "max-age=0"
         }
         
         # Create a session to maintain cookies
         session = requests.Session()
         
-        # First, make a GET request to the BSE homepage to get cookies
+        # Special handling for BSE India URLs
         if "bseindia.com" in url:
-            session.get("https://www.bseindia.com/", headers=headers)
-            
-        # Now make the actual request for the PDF
-        response = session.get(url, headers=headers, stream=True, timeout=50)
-        response.raise_for_status()
+            # Visit the BSE homepage first to get cookies
+            session.get("https://www.bseindia.com/", headers=headers)            
+            # If it's an AnnPdfOpen URL, we need to handle it differently
+            if "AnnPdfOpen.aspx" in url:
+                # Extract the Pname parameter
+                pname = re.search(r'Pname=([^&]+)', url)
+                if pname:
+                    pname_value = pname.group(1)
+                    
+                    # Construct a different URL that might work better
+                    alt_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
+                    
+                    # Try the alternative URL
+                    try:
+                        response = session.get(alt_url, headers=headers, stream=True, timeout=50)
+                        response.raise_for_status()
+                    except:
+                        # If that fails, try the original with modified headers
+                        headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
+                        response = session.get(url, headers=headers, stream=True, timeout=50)
+                        response.raise_for_status()
+                else:
+                    # If we can't extract Pname, try the original URL
+                    response = session.get(url, headers=headers, stream=True, timeout=50)
+                    response.raise_for_status()
+            else:
+                # For other BSE URLs
+                response = session.get(url, headers=headers, stream=True, timeout=50)
+                response.raise_for_status()
+        else:
+            # For non-BSE URLs
+            response = session.get(url, headers=headers, stream=True, timeout=50)
+            response.raise_for_status()
 
         file_path = os.path.join(folder_path, file_name)
         content = response.content  # Store content before writing to file
