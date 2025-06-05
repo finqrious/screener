@@ -9,6 +9,12 @@ import urllib.parse
 import streamlit as st
 import base64
 import io
+import random
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import tempfile
 
 def get_webpage_content(stock_name):
     url = f"https://www.screener.in/company/{stock_name}/consolidated/#documents"
@@ -80,7 +86,136 @@ def format_filename(date_str, doc_type):
     clean_date = date_str.replace(' ', '_').replace('/', '_')
     return f"{clean_date}_{doc_type}.pdf"
 
-def download_pdf(url, folder_path, file_name):
+# Add this function to handle Selenium-based downloads
+def download_with_selenium(url, folder_path, file_name):
+    try:
+        # Set up Chrome options
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--window-size=1920,1080")
+        
+        # Add random user agent
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15"
+        ]
+        chrome_options.add_argument(f"--user-agent={random.choice(user_agents)}")
+        
+        # Set up download preferences
+        temp_dir = tempfile.mkdtemp()
+        prefs = {
+            "download.default_directory": temp_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "plugins.always_open_pdf_externally": True
+        }
+        chrome_options.add_experimental_option("prefs", prefs)
+        
+        try:
+            # Try using webdriver_manager with specific version
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager(cache_valid_range=1).install()),
+                options=chrome_options
+            )
+        except Exception as driver_error:
+            st.warning(f"Chrome driver error: {str(driver_error)}. Falling back to requests method.")
+            # Fall back to requests method
+            return download_with_requests(url, folder_path, file_name)
+        
+        # First visit the main site to get cookies
+        if "bseindia.com" in url:
+            driver.get("https://www.bseindia.com/")
+            time.sleep(3)  # Increased wait time
+        elif "nseindia.com" in url:
+            driver.get("https://www.nseindia.com/")
+            time.sleep(3)  # Increased wait time
+            
+        # Now navigate to the actual URL
+        driver.get(url)
+        time.sleep(5)  # Wait for download to potentially start
+        
+        # For direct PDF viewing in browser, we need to get the content
+        page_source = driver.page_source
+        
+        # Check if we're on a PDF page
+        if "application/pdf" in page_source or driver.current_url.endswith(".pdf"):
+            try:
+                # Get the PDF content directly
+                pdf_content = driver.execute_script("return document.querySelector('embed').src")
+                if pdf_content and pdf_content.startswith("data:application/pdf;base64,"):
+                    pdf_data = pdf_content.split(",")[1]
+                    content = base64.b64decode(pdf_data)
+                    
+                    # Save the file
+                    file_path = os.path.join(folder_path, file_name)
+                    with open(file_path, 'wb') as file:
+                        file.write(content)
+                    
+                    driver.quit()
+                    return file_path, content
+            except:
+                pass  # If this fails, continue with other methods
+        
+        # Check if file was downloaded to temp directory
+        downloaded_files = os.listdir(temp_dir)
+        if downloaded_files:
+            # Get the most recent file
+            downloaded_file = os.path.join(temp_dir, downloaded_files[0])
+            
+            # Read the content
+            with open(downloaded_file, 'rb') as file:
+                content = file.read()
+            
+            # Save to the target location
+            file_path = os.path.join(folder_path, file_name)
+            with open(file_path, 'wb') as file:
+                file.write(content)
+            
+            # Clean up
+            os.remove(downloaded_file)
+            driver.quit()
+            
+            return file_path, content
+        
+        # If no file was downloaded, try to get it via requests with the cookies from Selenium
+        cookies = driver.get_cookies()
+        driver.quit()
+        
+        # Convert Selenium cookies to requests format
+        cookies_dict = {cookie['name']: cookie['value'] for cookie in cookies}
+        
+        # Make request with the cookies
+        headers = {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": url,
+            "Connection": "keep-alive"
+        }
+        
+        response = requests.get(url, headers=headers, cookies=cookies_dict, stream=True, timeout=50)
+        response.raise_for_status()
+        
+        file_path = os.path.join(folder_path, file_name)
+        content = response.content
+        
+        with open(file_path, 'wb') as file:
+            file.write(content)
+        
+        return file_path, content
+        
+    except Exception as e:
+        st.error(f"Selenium download error for {url}: {str(e)}")
+        # Fall back to requests method
+        return download_with_requests(url, folder_path, file_name)
+
+# Add a new function for requests-based downloads
+def download_with_requests(url, folder_path, file_name):
     try:
         # More comprehensive browser-like headers
         headers = {
@@ -100,7 +235,8 @@ def download_pdf(url, folder_path, file_name):
         # Special handling for BSE India URLs
         if "bseindia.com" in url:
             # Visit the BSE homepage first to get cookies
-            session.get("https://www.bseindia.com/", headers=headers)            
+            session.get("https://www.bseindia.com/", headers=headers)
+            
             # If it's an AnnPdfOpen URL, we need to handle it differently
             if "AnnPdfOpen.aspx" in url:
                 # Extract the Pname parameter
@@ -128,8 +264,13 @@ def download_pdf(url, folder_path, file_name):
                 # For other BSE URLs
                 response = session.get(url, headers=headers, stream=True, timeout=50)
                 response.raise_for_status()
+        elif "nseindia.com" in url:
+            # Visit the NSE homepage first to get cookies
+            session.get("https://www.nseindia.com/", headers=headers)
+            response = session.get(url, headers=headers, stream=True, timeout=50)
+            response.raise_for_status()
         else:
-            # For non-BSE URLs
+            # For non-BSE/NSE URLs
             response = session.get(url, headers=headers, stream=True, timeout=50)
             response.raise_for_status()
 
@@ -144,32 +285,220 @@ def download_pdf(url, folder_path, file_name):
         st.error(f"Error downloading {url}: {e}")
         return None, None
 
+def download_pdf(url, folder_path, file_name):
+    # For BSE and NSE URLs, try requests first (more reliable than Selenium in this case)
+    if "bseindia.com" in url or "nseindia.com" in url:
+        result = download_with_requests(url, folder_path, file_name)
+        if result[0]:  # If successful
+            return result
+        # If requests failed, try Selenium as fallback
+        return download_with_selenium(url, folder_path, file_name)
+    
+    # For other URLs, use the regular requests approach
+    return download_with_requests(url, folder_path, file_name)
+
+
+def main():
+    try:
+        st.set_page_config(page_title="StockLib", page_icon="📚")
+        
+        # Initialize session state for About modal
+        if 'show_about' not in st.session_state:
+            st.session_state.show_about = False
+        
+        # Add About button and modal
+        with st.container():
+            # Create a right-aligned container for buttons
+            _, right_col = st.columns([3, 1])  # Adjusted ratio to give more space for buttons
+            with right_col:
+                if st.button("About", type="secondary", use_container_width=True):
+                    st.session_state.show_about = True
+            
+            if st.session_state.show_about:
+                # Use Streamlit's native components instead of custom HTML/CSS
+                st.subheader("About StockLib 📚")
+                st.caption("StockLib + NotebookLLM = Your AI-Powered Business Analyst")
+                
+                with st.expander("Quick Guide", expanded=True):
+                    st.markdown("""
+                    1. Enter stock name (Example: TATAMOTORS, HDFCBANK)
+                    2. Select documents you want to download
+                    3. Avoid the hassle of downloading documents one by one from screener
+                    4. Get your ZIP file with all documents in single click
+                    5. Upload these docs to NotebookLLM easily
+                    6. Ask questions like:
+                       - "What's the company's business model?"
+                       - "Explain their growth strategy"
+                       - "What are their key products?"
+                    7. Get instant insights from years of business data! 🚀
+                    """)
+                
+                st.caption("Note: All documents belong to BSE/NSE/respective companies and are fetched from screener.in")
+                
+                # Standard Streamlit close button
+                if st.button("Close", key="close_about_button"):
+                    st.session_state.show_about = False
+                    st.rerun()
+                    
+        # Improved header styling
+        st.markdown("""
+            <h1 style='text-align: center;'>StockLib 📚</h1>
+            <h4 style='text-align: center; color: #666666;'>Your First Step in Fundamental Analysis – Your Business Data Library!</h4>
+            <hr>
+        """, unsafe_allow_html=True)
+        
+        # Create a container for the main content
+        main_container = st.container()
+        
+        # Create a container for the footer
+        footer_container = st.container()
+        
+        with main_container:
+            # Add form with improved styling
+            with st.form(key='stock_form'):
+                stock_name = st.text_input("Enter the stock name (BSE/NSE ticker):", placeholder="Example: TATAMOTORS")
+                
+                st.markdown("### Select Document Types")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    annual_reports = st.checkbox("Annual Reports 📄", value=True)
+                with col2:
+                    transcripts = st.checkbox("Concall Transcripts 📝", value=True)
+                with col3:
+                    ppts = st.checkbox("Presentations 📊", value=True)
+                
+                submit_button = st.form_submit_button(label="🔍 Fetch Documents")
+        
+            # Process form submission
+            if submit_button and stock_name:
+                doc_types = []
+                if annual_reports:
+                    doc_types.append("Annual_Report")
+                if transcripts:
+                    doc_types.append("Transcript")
+                if ppts:
+                    doc_types.append("PPT")
+                
+                if not doc_types:
+                    st.warning("No document types selected.")
+                    return
+                
+                with st.spinner("🔍 Searching for documents..."):
+                    html_content = get_webpage_content(stock_name)
+                    
+                    if not html_content:
+                        return
+                    
+                    links = parse_html_content(html_content)
+                    
+                    if not links:
+                        st.warning(f"No documents found for {stock_name}.")
+                        return
+                    
+                    # Filter links by selected document types
+                    filtered_links = [link for link in links if link['type'] in doc_types]
+                    
+                    if not filtered_links:
+                        st.warning(f"No {', '.join(doc_types)} found for {stock_name}.")
+                        return
+                    
+                    # Display document count
+                    st.success(f"Found {len(filtered_links)} documents for {stock_name}!")
+                    
+                    # Create a temporary directory for downloads
+                    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
+                    os.makedirs(temp_dir, exist_ok=True)
+                    
+                    # Create progress bar and status text
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    # Download documents
+                    successful_downloads, file_contents = download_selected_documents(
+                        filtered_links, temp_dir, doc_types, progress_bar, status_text
+                    )
+                    
+                    # Update status
+                    if successful_downloads:
+                        actual_count = len(successful_downloads)
+                        total_count = len(filtered_links)  # Define total_count here
+                        status_text.text(f"Successfully downloaded {actual_count}/{total_count} documents!")
+                        
+                        # Create ZIP file
+                        zip_data = create_zip_in_memory(file_contents)
+                        
+                        # Offer download button with accurate count
+                        st.download_button(
+                            label=f"📥 Download {actual_count} Documents (ZIP)",
+                            data=zip_data,
+                            file_name=f"{stock_name}_documents.zip",
+                            mime="application/zip",
+                            use_container_width=True
+                        )
+                        
+                        # Show warning if some downloads failed
+                        if actual_count < total_count:
+                            st.warning(f"{total_count - actual_count} documents could not be downloaded due to access restrictions or other errors.")
+                    else:
+                        status_text.text("No documents were successfully downloaded.")
+        
+        with footer_container:
+            st.markdown("""
+                <hr>
+                <p style='text-align: center; color: #888888; font-size: 0.8em;'>
+                    StockLib is a tool for educational purposes only. Not financial advice.
+                </p>
+            """, unsafe_allow_html=True)
+            
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
+        st.info("Please try refreshing the page. If the problem persists, contact support.")
+
+# Add these missing functions
 def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text):
     os.makedirs(output_folder, exist_ok=True)
     successful_downloads = []
     file_contents = {}
     
-    total_files = sum(1 for link in links if link['type'] in doc_types)
+    # Only count links that match the selected document types
+    filtered_links = [link for link in links if link['type'] in doc_types]
+    total_files = len(filtered_links)
+    
     progress_step = 1.0 / total_files if total_files > 0 else 0
     current_progress = 0.0
     downloaded_count = 0
+    failed_count = 0
     
-    for link in links:
-        if link['type'] in doc_types:
-            try:
-                file_name = format_filename(link['date'], link['type'])
-                file_path, content = download_pdf(link['url'], output_folder, file_name)
-                if file_path:
-                    successful_downloads.append(file_path)
-                    file_contents[file_name] = content
-                    downloaded_count += 1
-                current_progress += progress_step
-                progress_bar.progress(min(current_progress, 1.0))
-                status_text.text(f"Downloading: {downloaded_count}/{total_files} documents")
-                time.sleep(1)
-            except Exception as e:
-                st.warning(f"Skipped {link['date']}_{link['type']}: {str(e)}")
-                continue
+    for i, link in enumerate(filtered_links):
+        try:
+            file_name = format_filename(link['date'], link['type'])
+            
+            # Check if this filename already exists in our collection (avoid duplicates)
+            if file_name in file_contents:
+                # Modify filename to make it unique
+                base_name, ext = os.path.splitext(file_name)
+                file_name = f"{base_name}_{i}{ext}"
+                
+            file_path, content = download_pdf(link['url'], output_folder, file_name)
+            
+            if file_path and content and len(content) > 100:  # Ensure content is substantial
+                successful_downloads.append(file_path)
+                file_contents[file_name] = content
+                downloaded_count += 1
+            else:
+                failed_count += 1
+                st.warning(f"Failed to download {link['date']}_{link['type']}")
+            
+            current_progress += progress_step
+            progress_bar.progress(min(current_progress, 1.0))
+            status_text.text(f"Downloading: {downloaded_count}/{total_files} documents (Failed: {failed_count})")
+            time.sleep(1)
+        except Exception as e:
+            failed_count += 1
+            st.warning(f"Skipped {link['date']}_{link['type']}: {str(e)}")
+            current_progress += progress_step
+            progress_bar.progress(min(current_progress, 1.0))
+            continue
 
     return successful_downloads, file_contents
 
@@ -181,156 +510,7 @@ def create_zip_in_memory(file_contents):
     
     zip_buffer.seek(0)
     return zip_buffer.getvalue()  # Return the bytes directly
-def main():
-    st.set_page_config(page_title="StockLib", page_icon="📚")
-    
-    # Initialize session state for About modal
-    if 'show_about' not in st.session_state:
-        st.session_state.show_about = False
-    # Add About button and modal
-    with st.container():
-        # Create a right-aligned container for buttons
-        _, right_col = st.columns([3, 1])  # Adjusted ratio to give more space for buttons
-        with right_col:
-            if st.button("About", type="secondary", use_container_width=True):
-                st.session_state.show_about = True
-        
-        if st.session_state.show_about:
-            # Use Streamlit's native components instead of custom HTML/CSS
-            st.subheader("About StockLib 📚")
-            st.caption("StockLib + NotebookLLM = Your AI-Powered Business Analyst")
-            
-            with st.expander("Quick Guide", expanded=True):
-                st.markdown("""
-                1. Enter stock name (Example: TATAMOTORS, HDFCBANK)
-                2. Select documents you want to download
-                3. Avoid the hassle of downloading documents one by one from screener
-                4. Get your ZIP file with all documents in single click
-                5. Upload these docs to NotebookLLM easily
-                6. Ask questions like:
-                   - "What's the company's business model?"
-                   - "Explain their growth strategy"
-                   - "What are their key products?"
-                7. Get instant insights from years of business data! 🚀
-                """)
-            
-            st.caption("Note: All documents belong to BSE/NSE/respective companies and are fetched from screener.in")
-            
-            # Standard Streamlit close button
-            if st.button("Close", key="close_about_button"):
-                st.session_state.show_about = False
-                st.rerun()
-    # Improved header styling
-    st.markdown("""
-        <h1 style='text-align: center;'>StockLib 📚</h1>
-        <h4 style='text-align: center; color: #666666;'>Your First Step in Fundamental Analysis – Your Business Data Library!</h4>
-        <hr>
-    """, unsafe_allow_html=True)
-    
-    # Create a container for the main content
-    main_container = st.container()
-    
-    # Create a container for the footer
-    footer_container = st.container()
-    
-    with main_container:
-        # Add form with improved styling
-        with st.form(key='stock_form'):
-            stock_name = st.text_input("Enter the stock name (BSE/NSE ticker):", placeholder="Example: TATAMOTORS")
-            
-            st.markdown("### Select Document Types")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                annual_reports = st.checkbox("Annual Reports 📄", value=True)
-            with col2:
-                transcripts = st.checkbox("Concall Transcripts 📝", value=True)
-            with col3:
-                ppts = st.checkbox("Presentations 📊", value=True)
-            
-            submit_button = st.form_submit_button(label="🔍 Fetch Documents")
-    
-        # Process form submission
-        if submit_button and stock_name:
-            doc_types = []
-            if annual_reports:
-                doc_types.append("Annual_Report")
-            if transcripts:
-                doc_types.append("Transcript")
-            if ppts:
-                doc_types.append("PPT")
-            
-            if not doc_types:
-                st.warning("No document types selected.")
-                return
-            
-            with st.spinner("🔍 Searching for documents..."):
-                html_content = get_webpage_content(stock_name)
-                
-                if not html_content:
-                    st.error("Failed to fetch webpage content. Please check the stock ticker and try again.")
-                    return
-                
-                try:
-                    links = parse_html_content(html_content)
-                    if not links:
-                        st.warning("📭 No documents found for this stock.")
-                        return
-                    
-                    filtered_links = [link for link in links if link['type'] in doc_types]
-                    if not filtered_links:
-                        st.warning("📭 No documents found for the selected types.")
-                        return
-                    
-                    # Create containers for different states
-                    progress_container = st.container()
-                    download_container = st.container()
-                    
-                    with progress_container:
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        
-                    pdf_folder = f"{stock_name}_documents"
-                    downloaded_files, file_contents = download_selected_documents(
-                        filtered_links, pdf_folder, doc_types, progress_bar, status_text
-                    )
-                    # Clear the searching spinner
-                    st.spinner(None)
-                    # Add Twitter contact link at the bottom
-                    st.markdown("<br><br><hr>", unsafe_allow_html=True)
-                    st.markdown(
-                        '<div style="text-align: center; padding: 10px; color: #666666;">'
-                        'For any query please contact: '
-                        '<a href="https://x.com/PatilInvests" target="_blank">@patilinvests</a>'
-                        '</div>',
-                        unsafe_allow_html=True
-                    )
-                    if downloaded_files:
-                        progress_bar.progress(1.0)
-                        status_text.success(f"✅ Downloaded {len(downloaded_files)} out of {len(filtered_links)} documents")
-                        
-                        with download_container:
-                            zip_data = create_zip_in_memory(file_contents)
-                            st.download_button(
-                                label="📦 Download All Documents as ZIP",
-                                data=zip_data,
-                                file_name=f"{stock_name}_documents.zip",
-                                mime="application/zip",
-                                key="download_button"
-                            )
-                    else:
-                        st.error("❌ No files could be downloaded.")
-                        
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
-    # Add Twitter contact link in the footer container
-    with footer_container:
-        st.markdown("""
-            <div style="position: fixed; bottom: 0; left: 0; right: 0; background-color: white; padding: 10px; border-top: 1px solid #e5e5e5;">
-                <div style="text-align: center; color: #666666;">
-                    For any query please contact: 
-                    <a href="https://x.com/PatilInvests" target="_blank" style="color: #1DA1F2; text-decoration: none;">@patilinvests</a>
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+
+# Add this at the end of the file to run the app
 if __name__ == "__main__":
     main()
