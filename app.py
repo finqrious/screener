@@ -116,10 +116,11 @@ def download_with_selenium(url, folder_path, file_name):
         }
         chrome_options.add_experimental_option("prefs", prefs)
         
+        # Fix the ChromeDriverManager issue
         try:
             # Try using webdriver_manager with specific version
             driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager(cache_valid_range=1).install()),
+                service=Service(ChromeDriverManager().install()),  # Remove cache_valid_range parameter
                 options=chrome_options
             )
         except Exception as driver_error:
@@ -131,9 +132,12 @@ def download_with_selenium(url, folder_path, file_name):
         if "bseindia.com" in url:
             driver.get("https://www.bseindia.com/")
             time.sleep(3)  # Increased wait time
-        elif "nseindia.com" in url:
+        elif "nseindia.com" in url or "archives.nseindia.com" in url:
+            # Enhanced NSE handling - visit multiple pages
             driver.get("https://www.nseindia.com/")
-            time.sleep(3)  # Increased wait time
+            time.sleep(3)
+            driver.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports")
+            time.sleep(3)
             
         # Now navigate to the actual URL
         driver.get(url)
@@ -264,11 +268,25 @@ def download_with_requests(url, folder_path, file_name):
                 # For other BSE URLs
                 response = session.get(url, headers=headers, stream=True, timeout=50)
                 response.raise_for_status()
-        elif "nseindia.com" in url:
-            # Visit the NSE homepage first to get cookies
+        elif "nseindia.com" in url or "archives.nseindia.com" in url:
+            # Enhanced NSE handling - visit multiple NSE pages to get proper cookies
+            headers["Referer"] = "https://www.nseindia.com/"
+            
+            # Visit multiple NSE pages to get proper cookies
             session.get("https://www.nseindia.com/", headers=headers)
-            response = session.get(url, headers=headers, stream=True, timeout=50)
-            response.raise_for_status()
+            time.sleep(1)
+            session.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports", headers=headers)
+            time.sleep(1)
+            
+            # Try different referrers for NSE
+            try:
+                response = session.get(url, headers=headers, stream=True, timeout=50)
+                response.raise_for_status()
+            except:
+                # If that fails, try with a different referrer
+                headers["Referer"] = "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"
+                response = session.get(url, headers=headers, stream=True, timeout=50)
+                response.raise_for_status()
         else:
             # For non-BSE/NSE URLs
             response = session.get(url, headers=headers, stream=True, timeout=50)
@@ -287,7 +305,40 @@ def download_with_requests(url, folder_path, file_name):
 
 def download_pdf(url, folder_path, file_name):
     # For BSE and NSE URLs, try requests first (more reliable than Selenium in this case)
-    if "bseindia.com" in url or "nseindia.com" in url:
+    if "bseindia.com" in url or "nseindia.com" in url or "archives.nseindia.com" in url:
+        # For NSE archives, try a special approach first
+        if "archives.nseindia.com" in url:
+            # Try direct download with special headers
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "Accept": "application/pdf",
+                    "Accept-Language": "en-US,en;q=0.5",
+                    "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports",
+                    "sec-fetch-dest": "document",
+                    "sec-fetch-mode": "navigate",
+                    "sec-fetch-site": "same-origin"
+                }
+                session = requests.Session()
+                session.get("https://www.nseindia.com/", headers=headers)
+                time.sleep(2)
+                session.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports", headers=headers)
+                time.sleep(2)
+                
+                response = session.get(url, headers=headers, stream=True, timeout=50)
+                response.raise_for_status()
+                
+                file_path = os.path.join(folder_path, file_name)
+                content = response.content
+                
+                with open(file_path, 'wb') as file:
+                    file.write(content)
+                
+                return file_path, content
+            except:
+                pass  # If this fails, continue with regular methods
+        
+        # Try regular requests method
         result = download_with_requests(url, folder_path, file_name)
         if result[0]:  # If successful
             return result
