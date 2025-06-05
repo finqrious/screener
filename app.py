@@ -88,6 +88,8 @@ def format_filename(date_str, doc_type):
 
 # Add this function to handle Selenium-based downloads
 def download_with_selenium(url, folder_path, file_name):
+    driver = None # Initialize driver to None
+    temp_dir = None # Initialize temp_dir to None
     try:
         # Set up Chrome options
         chrome_options = Options()
@@ -116,18 +118,19 @@ def download_with_selenium(url, folder_path, file_name):
         }
         chrome_options.add_experimental_option("prefs", prefs)
         
-        # Fix the ChromeDriverManager issue
+        # Fix the ChromeDriverManager issue - the error message suggests the issue is in install()
+        # The current try/except handles the fallback, so we'll keep it.
+        # The user might need to update webdriver-manager if this persists.
         try:
-            # Try using webdriver_manager with specific version
             driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),  # Remove cache_valid_range parameter
+                service=Service(ChromeDriverManager().install()),
                 options=chrome_options
             )
         except Exception as driver_error:
             st.warning(f"Chrome driver error: {str(driver_error)}. Falling back to requests method.")
-            # Fall back to requests method
-            return download_with_requests(url, folder_path, file_name)
-        
+            # Indicate failure so download_pdf can use requests
+            return None, None
+
         # First visit the main site to get cookies
         if "bseindia.com" in url:
             driver.get("https://www.bseindia.com/")
@@ -141,84 +144,135 @@ def download_with_selenium(url, folder_path, file_name):
             
         # Now navigate to the actual URL
         driver.get(url)
-        time.sleep(5)  # Wait for download to potentially start
         
-        # For direct PDF viewing in browser, we need to get the content
-        page_source = driver.page_source
-        
-        # Check if we're on a PDF page
-        if "application/pdf" in page_source or driver.current_url.endswith(".pdf"):
-            try:
-                # Get the PDF content directly
-                pdf_content = driver.execute_script("return document.querySelector('embed').src")
-                if pdf_content and pdf_content.startswith("data:application/pdf;base64,"):
-                    pdf_data = pdf_content.split(",")[1]
-                    content = base64.b64decode(pdf_data)
-                    
-                    # Save the file
-                    file_path = os.path.join(folder_path, file_name)
-                    with open(file_path, 'wb') as file:
-                        file.write(content)
-                    
-                    driver.quit()
-                    return file_path, content
-            except:
-                pass  # If this fails, continue with other methods
-        
-        # Check if file was downloaded to temp directory
-        downloaded_files = os.listdir(temp_dir)
-        if downloaded_files:
-            # Get the most recent file
-            downloaded_file = os.path.join(temp_dir, downloaded_files[0])
-            
-            # Read the content
-            with open(downloaded_file, 'rb') as file:
+        # --- Download Detection Logic ---
+        # Wait for a file to appear in the download directory for up to 30 seconds
+        download_timeout = 30
+        start_time = time.time()
+        downloaded_file_path = None
+
+        while time.time() - start_time < download_timeout:
+            downloaded_files = os.listdir(temp_dir)
+            # Look for files that are not partial downloads (e.g., .crdownload)
+            completed_files = [f for f in downloaded_files if not f.endswith('.crdownload')]
+            if completed_files:
+                # Assuming the first completed file is the one we want
+                downloaded_file_path = os.path.join(temp_dir, completed_files[0])
+                break
+            time.sleep(1) # Wait a bit before checking again
+
+        # Check if a file was successfully downloaded
+        if downloaded_file_path and os.path.exists(downloaded_file_path):
+             # Read the content
+            with open(downloaded_file_path, 'rb') as file:
                 content = file.read()
             
             # Save to the target location
-            file_path = os.path.join(folder_path, file_name)
-            with open(file_path, 'wb') as file:
+            final_file_path = os.path.join(folder_path, file_name)
+            with open(final_file_path, 'wb') as file:
                 file.write(content)
             
-            # Clean up
-            os.remove(downloaded_file)
-            driver.quit()
+            # Clean up temp file
+            os.remove(downloaded_file_path)
             
-            return file_path, content
-        
-        # If no file was downloaded, try to get it via requests with the cookies from Selenium
-        cookies = driver.get_cookies()
-        driver.quit()
-        
-        # Convert Selenium cookies to requests format
-        cookies_dict = {cookie['name']: cookie['value'] for cookie in cookies}
-        
-        # Make request with the cookies
-        headers = {
-            "User-Agent": random.choice(user_agents),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Referer": url,
-            "Connection": "keep-alive"
-        }
-        
-        response = requests.get(url, headers=headers, cookies=cookies_dict, stream=True, timeout=50)
-        response.raise_for_status()
-        
-        file_path = os.path.join(folder_path, file_name)
-        content = response.content
-        
-        with open(file_path, 'wb') as file:
-            file.write(content)
-        
-        return file_path, content
+            # Check content size before returning
+            if len(content) > 100: # Use the same size check as in download_selected_documents
+                 return final_file_path, content
+            else:
+                 st.warning(f"Downloaded file {file_name} is too small ({len(content)} bytes). Treating as failed.")
+                 return None, None # Treat as failed download
+
+        # If no file was downloaded to temp directory, try getting content via base64 embed (less reliable)
+        try:
+            # Check if we're on a PDF page and try to get base64 content
+            if "application/pdf" in driver.page_source or driver.current_url.lower().endswith(".pdf"):
+                 pdf_content_base64 = driver.execute_script("return document.querySelector('embed').src")
+                 if pdf_content_base64 and pdf_content_base64.startswith("data:application/pdf;base64,"):
+                     pdf_data = pdf_content_base64.split(",")[1]
+                     content = base64.b64decode(pdf_data)
+                     
+                     # Save the file
+                     final_file_path = os.path.join(folder_path, file_name)
+                     with open(final_file_path, 'wb') as file:
+                         file.write(content)
+                     
+                     # Check content size before returning
+                     if len(content) > 100:
+                         return final_file_path, content
+                     else:
+                         st.warning(f"Extracted base64 content for {file_name} is too small ({len(content)} bytes). Treating as failed.")
+                         return None, None
+                 else:
+                     st.warning(f"Could not extract base64 PDF content for {url}.")
+        except Exception as base64_error:
+            st.warning(f"Error extracting base64 content for {url}: {str(base64_error)}")
+            pass # Continue if base64 extraction fails
+
+        # If neither download nor base64 extraction worked, try getting content via requests with Selenium cookies
+        try:
+            cookies = driver.get_cookies()
+            
+            # Convert Selenium cookies to requests format
+            cookies_dict = {cookie['name']: cookie['value'] for cookie in cookies}
+            
+            # Make request with the cookies
+            headers = {
+                "User-Agent": random.choice(user_agents),
+                "Accept": "application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8", # Adjust accept header
+                "Accept-Language": "en-US,en;q=0.5",
+                "Referer": driver.current_url, # Use the current URL as referrer
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin" if "bseindia.com" in url or "nseindia.com" in url else "none"
+            }
+            
+            response = requests.get(url, headers=headers, cookies=cookies_dict, stream=True, timeout=50)
+            response.raise_for_status()
+            
+            final_file_path = os.path.join(folder_path, file_name)
+            content = response.content
+            
+            # Check if content looks like an error page (e.g., HTML instead of PDF)
+            if content.strip().startswith(b'<!DOCTYPE html') or content.strip().startswith(b'<html'):
+                 st.warning(f"Downloaded content via requests+cookies for {url} appears to be an HTML page, not a PDF.")
+                 return None, None # Treat as failed download
+
+            with open(final_file_path, 'wb') as file:
+                file.write(content)
+            
+            # Check content size before returning
+            if len(content) > 100:
+                 return final_file_path, content
+            else:
+                 st.warning(f"Downloaded content via requests+cookies for {file_name} is too small ({len(content)} bytes). Treating as failed.")
+                 return None, None
+
+        except Exception as requests_cookie_error:
+            st.error(f"Requests+cookies download error for {url}: {str(requests_cookie_error)}")
+            return None, None # Indicate failure
+
+        # If none of the methods worked
+        st.error(f"Failed to download {url} using all methods.")
+        return None, None
         
     except Exception as e:
         st.error(f"Selenium download error for {url}: {str(e)}")
-        # Fall back to requests method
-        return download_with_requests(url, folder_path, file_name)
+        return None, None # Indicate failure
+    finally:
+        # Ensure driver is quit and temp directory is cleaned up
+        if driver:
+            driver.quit()
+        if temp_dir and os.path.exists(temp_dir):
+             try:
+                 # Clean up any remaining files in the temp directory
+                 for f in os.listdir(temp_dir):
+                     os.remove(os.path.join(temp_dir, f))
+                 os.rmdir(temp_dir)
+             except Exception as cleanup_error:
+                 st.warning(f"Error cleaning up temp directory {temp_dir}: {cleanup_error}")
 
-# Add a new function for requests-based downloads
+# Add this new function for requests-based downloads
 def download_with_requests(url, folder_path, file_name):
     try:
         # More comprehensive browser-like headers
@@ -226,11 +280,14 @@ def download_with_requests(url, folder_path, file_name):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
-            "Referer": "https://www.bseindia.com/",
             "DNT": "1",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
-            "Cache-Control": "max-age=0"
+            "Cache-Control": "max-age=0",
+            "Sec-Fetch-Dest": "document", # Add more sec-fetch headers
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none", # Start with none, might change later
+            "Sec-Fetch-User": "?1"
         }
         
         # Create a session to maintain cookies
@@ -240,6 +297,8 @@ def download_with_requests(url, folder_path, file_name):
         if "bseindia.com" in url:
             # Visit the BSE homepage first to get cookies
             session.get("https://www.bseindia.com/", headers=headers)
+            headers["Referer"] = "https://www.bseindia.com/" # Set referrer after visiting homepage
+            headers["Sec-Fetch-Site"] = "same-origin" # Change sec-fetch-site
             
             # If it's an AnnPdfOpen URL, we need to handle it differently
             if "AnnPdfOpen.aspx" in url:
@@ -253,40 +312,50 @@ def download_with_requests(url, folder_path, file_name):
                     
                     # Try the alternative URL
                     try:
-                        response = session.get(alt_url, headers=headers, stream=True, timeout=50)
+                        # Use headers with referrer pointing to stock page
+                        alt_headers = headers.copy()
+                        alt_headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
+                        response = session.get(alt_url, headers=alt_headers, stream=True, timeout=50)
                         response.raise_for_status()
                     except:
                         # If that fails, try the original with modified headers
-                        headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
-                        response = session.get(url, headers=headers, stream=True, timeout=50)
+                        # Use headers with referrer pointing to stock page
+                        original_headers = headers.copy()
+                        original_headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
+                        response = session.get(url, headers=original_headers, stream=True, timeout=50)
                         response.raise_for_status()
                 else:
-                    # If we can't extract Pname, try the original URL
-                    response = session.get(url, headers=headers, stream=True, timeout=50)
+                    # If we can't extract Pname, try the original URL with modified headers
+                    original_headers = headers.copy()
+                    original_headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
+                    response = session.get(url, headers=original_headers, stream=True, timeout=50)
                     response.raise_for_status()
             else:
-                # For other BSE URLs
+                # For other BSE URLs, use headers with referrer pointing to homepage
                 response = session.get(url, headers=headers, stream=True, timeout=50)
                 response.raise_for_status()
         elif "nseindia.com" in url or "archives.nseindia.com" in url:
             # Enhanced NSE handling - visit multiple NSE pages to get proper cookies
-            headers["Referer"] = "https://www.nseindia.com/"
+            headers["Referer"] = "https://www.nseindia.com/" # Set initial referrer
+            headers["Sec-Fetch-Site"] = "same-origin" # Change sec-fetch-site
             
             # Visit multiple NSE pages to get proper cookies
             session.get("https://www.nseindia.com/", headers=headers)
             time.sleep(1)
+            # Update referrer for the next visit
+            headers["Referer"] = "https://www.nseindia.com/"
             session.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports", headers=headers)
             time.sleep(1)
             
-            # Try different referrers for NSE
-            try:
-                response = session.get(url, headers=headers, stream=True, timeout=50)
-                response.raise_for_status()
-            except:
-                # If that fails, try with a different referrer
-                headers["Referer"] = "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"
-                response = session.get(url, headers=headers, stream=True, timeout=50)
-                response.raise_for_status()
+            # Now try the actual download URL
+            # Use headers with referrer pointing to the filings page
+            download_headers = headers.copy()
+            download_headers["Referer"] = "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"
+            download_headers["Accept"] = "application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" # Adjust accept header for PDF
+            download_headers["Sec-Fetch-Dest"] = "document" # Should be document for PDF
+            
+            response = session.get(url, headers=download_headers, stream=True, timeout=50)
+            response.raise_for_status()
         else:
             # For non-BSE/NSE URLs
             response = session.get(url, headers=headers, stream=True, timeout=50)
@@ -295,6 +364,12 @@ def download_with_requests(url, folder_path, file_name):
         file_path = os.path.join(folder_path, file_name)
         content = response.content  # Store content before writing to file
         
+        # Check if content looks like an error page (e.g., HTML instead of PDF)
+        # Simple check: if it starts with '<!DOCTYPE html' or '<html'
+        if content.strip().startswith(b'<!DOCTYPE html') or content.strip().startswith(b'<html'):
+             st.warning(f"Downloaded content for {url} appears to be an HTML page, not a PDF.")
+             return None, None # Treat as failed download
+
         with open(file_path, 'wb') as file:
             file.write(content)
 
@@ -306,43 +381,12 @@ def download_with_requests(url, folder_path, file_name):
 def download_pdf(url, folder_path, file_name):
     # For BSE and NSE URLs, try requests first (more reliable than Selenium in this case)
     if "bseindia.com" in url or "nseindia.com" in url or "archives.nseindia.com" in url:
-        # For NSE archives, try a special approach first
-        if "archives.nseindia.com" in url:
-            # Try direct download with special headers
-            try:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                    "Accept": "application/pdf",
-                    "Accept-Language": "en-US,en;q=0.5",
-                    "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports",
-                    "sec-fetch-dest": "document",
-                    "sec-fetch-mode": "navigate",
-                    "sec-fetch-site": "same-origin"
-                }
-                session = requests.Session()
-                session.get("https://www.nseindia.com/", headers=headers)
-                time.sleep(2)
-                session.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports", headers=headers)
-                time.sleep(2)
-                
-                response = session.get(url, headers=headers, stream=True, timeout=50)
-                response.raise_for_status()
-                
-                file_path = os.path.join(folder_path, file_name)
-                content = response.content
-                
-                with open(file_path, 'wb') as file:
-                    file.write(content)
-                
-                return file_path, content
-            except:
-                pass  # If this fails, continue with regular methods
-        
         # Try regular requests method
         result = download_with_requests(url, folder_path, file_name)
-        if result[0]:  # If successful
+        if result and result[0]:  # If successful (check result is not None and path exists)
             return result
         # If requests failed, try Selenium as fallback
+        st.info(f"Requests failed for {url}. Trying Selenium.") # Add info message for fallback
         return download_with_selenium(url, folder_path, file_name)
     
     # For other URLs, use the regular requests approach
