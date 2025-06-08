@@ -1,5 +1,7 @@
-streamlit
-requests
-beautifulsoup4
-selenium
-webdriver-manager
+requests==2.31.0
+beautifulsoup4==4.12.2
+streamlit==1.29.0
+selenium==4.15.2
+webdriver-manager==4.0.1
+lxml==4.9.3
+urllib3==2.1.0 
