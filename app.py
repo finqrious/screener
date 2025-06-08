@@ -16,8 +16,8 @@ REQUESTS_CONNECT_TIMEOUT = 15
 REQUESTS_READ_TIMEOUT = 180
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 ]
 
 # --- Helper Functions (Unchanged) ---
@@ -76,42 +76,51 @@ def parse_html_content(html_content):
 
 # --- NEW AND FINAL ROBUST DOWNLOAD LOGIC ---
 def download_file_attempt(url, base_name_no_ext, doc_type):
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    
-    # Check if this is a BSE Annual Report link that needs special handling
-    if "bseindia.com" in url and "AnnPdfOpen.aspx" in url:
-        if pname_match := re.search(r'Pname=([^&]+)', url):
-            pname_value = pname_match.group(1)
-            
-            # This is the direct attachment link format
-            download_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
-            
-            # *** THIS IS THE CRITICAL FIX ***
-            # BSE requires a plausible Referer to prevent hotlinking.
-            # We construct one that looks like we came from the announcements page.
-            scrip_code_match = re.search(r'scripcode=(\d+)', url, re.IGNORECASE)
-            scrip_code = scrip_code_match.group(1) if scrip_code_match else pname_value[:6]
-            headers["Referer"] = f"https://www.bseindia.com/corporates/ann.html?scrip={scrip_code}"
-            
-        else: # If we can't parse it, use the original URL
-            download_url = url
-    else:
-        # For all other links (NSE, company sites, etc.), use the URL as is
-        download_url = url
+    session = requests.Session()
+    session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
 
     try:
-        response = requests.get(download_url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+        # Special handling for BSE Annual Reports
+        if "bseindia.com" in url and "AnnPdfOpen.aspx" in url:
+            # Step 0: Parse the URL to get the attachment ID (Pname)
+            pname_match = re.search(r'Pname=([^&]+)', url)
+            if not pname_match:
+                return None, None, "DOWNLOAD_FAILED", "Could not parse BSE URL."
+            pname_value = pname_match.group(1)
+
+            # Step 1: Visit the homepage to initialize a session and get cookies
+            session.get("https://www.bseindia.com/", timeout=REQUESTS_CONNECT_TIMEOUT)
+            time.sleep(random.uniform(0.5, 1)) # Be a polite scraper
+
+            # Step 2: Visit the announcements page, which is the legitimate Referer
+            # This step is CRUCIAL for getting the right session cookies
+            scrip_code_match = re.search(r'scripcode=(\d+)', url, re.IGNORECASE)
+            scrip_code = scrip_code_match.group(1) if scrip_code_match else "500000" # Use a default if not found
+            referer_url = f"https://www.bseindia.com/corporates/ann.html?scrip={scrip_code}"
+            session.get(referer_url, timeout=REQUESTS_CONNECT_TIMEOUT)
+            time.sleep(random.uniform(0.5, 1))
+
+            # Step 3: Now, with a "warmed-up" session, hit the direct download link
+            download_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
+            session.headers.update({"Referer": referer_url}) # Set the referer for good measure
+            response = session.get(download_url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+
+        else:
+            # For all other links (NSE, company sites, etc.), a direct request is usually fine.
+            response = session.get(url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+
         response.raise_for_status()
 
+        # Final checks on the response content
         content_type = response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
-            return None, None, "DOWNLOAD_FAILED_HTML", "Server returned an HTML page instead of a file."
+            return None, None, "DOWNLOAD_FAILED_HTML", "Server returned an HTML page."
 
         content = response.content
         if len(content) < MIN_FILE_SIZE:
-            return None, None, "DOWNLOAD_FAILED_TOO_SMALL", "Downloaded file was too small to be valid."
+            return None, None, "DOWNLOAD_FAILED_TOO_SMALL", "File was too small."
 
-        file_ext = get_extension_from_response(response, download_url, doc_type)
+        file_ext = get_extension_from_response(response, url, doc_type)
         filename = base_name_no_ext + file_ext
         return filename, content, None, None
 
