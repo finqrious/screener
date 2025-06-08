@@ -16,9 +16,8 @@ REQUESTS_CONNECT_TIMEOUT = 15
 REQUESTS_READ_TIMEOUT = 180
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36"
 ]
 
 # --- Helper Functions (Unchanged) ---
@@ -72,58 +71,53 @@ def parse_html_content(html_content):
             except ValueError: date_str = date_div.text.strip()
             for link_tag in item.find_all('a', class_='concall-link'):
                 doc_type = 'Transcript' if 'Transcript' in link_tag.text else 'PPT' if 'PPT' in link_tag.text else None
-                if doc_type: all_links.append({'date': date_str, 'type': doc_type, 'url': link_tag['href']})
+                if doc_type: all_links.append({'date': str(date_str), 'type': doc_type, 'url': link_tag['href']})
     return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
 # --- NEW AND FINAL ROBUST DOWNLOAD LOGIC ---
 def download_file_attempt(url, base_name_no_ext, doc_type):
-    session = requests.Session()
-    session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
     
-    urls_to_try = [url]
-    
-    # The BSE Direct Link Hack
+    # Check if this is a BSE Annual Report link that needs special handling
     if "bseindia.com" in url and "AnnPdfOpen.aspx" in url:
         if pname_match := re.search(r'Pname=([^&]+)', url):
             pname_value = pname_match.group(1)
+            
             # This is the direct attachment link format
-            alt_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
-            # We try the direct link first as it's more likely to succeed
-            urls_to_try.insert(0, alt_url)
+            download_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
+            
+            # *** THIS IS THE CRITICAL FIX ***
+            # BSE requires a plausible Referer to prevent hotlinking.
+            # We construct one that looks like we came from the announcements page.
+            scrip_code_match = re.search(r'scripcode=(\d+)', url, re.IGNORECASE)
+            scrip_code = scrip_code_match.group(1) if scrip_code_match else pname_value[:6]
+            headers["Referer"] = f"https://www.bseindia.com/corporates/ann.html?scrip={scrip_code}"
+            
+        else: # If we can't parse it, use the original URL
+            download_url = url
+    else:
+        # For all other links (NSE, company sites, etc.), use the URL as is
+        download_url = url
 
-    last_error = ""
-    for i, attempt_url in enumerate(urls_to_try):
-        try:
-            # For BSE links, it's good practice to "warm up" the session
-            if "bseindia.com" in attempt_url:
-                session.get("https://www.bseindia.com/", timeout=REQUESTS_CONNECT_TIMEOUT)
-                time.sleep(0.5)
+    try:
+        response = requests.get(download_url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+        response.raise_for_status()
 
-            response = session.get(attempt_url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
-            response.raise_for_status()
+        content_type = response.headers.get('Content-Type', '').lower()
+        if 'text/html' in content_type:
+            return None, None, "DOWNLOAD_FAILED_HTML", "Server returned an HTML page instead of a file."
 
-            # Check if we got an HTML page instead of a file
-            content_type = response.headers.get('Content-Type', '').lower()
-            if 'text/html' in content_type:
-                last_error = "Server returned an HTML page instead of a file."
-                continue # Try the next URL if available
+        content = response.content
+        if len(content) < MIN_FILE_SIZE:
+            return None, None, "DOWNLOAD_FAILED_TOO_SMALL", "Downloaded file was too small to be valid."
 
-            # Successfully got a non-HTML response, process it
-            content = response.content
-            if len(content) < MIN_FILE_SIZE:
-                last_error = "Downloaded file was too small to be valid."
-                continue # Try the next URL if available
+        file_ext = get_extension_from_response(response, download_url, doc_type)
+        filename = base_name_no_ext + file_ext
+        return filename, content, None, None
 
-            file_ext = get_extension_from_response(response, attempt_url, doc_type)
-            filename = base_name_no_ext + file_ext
-            return filename, content, None, None
+    except requests.exceptions.RequestException as e:
+        return None, None, "DOWNLOAD_FAILED", str(e)
 
-        except requests.exceptions.RequestException as e:
-            last_error = str(e)
-            continue # Try the next URL if available
-
-    # If all attempts failed
-    return None, None, "DOWNLOAD_FAILED", f"All methods failed. Last error: {last_error}"
 
 # --- Main Application Logic ---
 def download_selected_documents(links, doc_types, progress_bar, status_text_area):
