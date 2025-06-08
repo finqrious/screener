@@ -21,9 +21,9 @@ import shutil
 # --- Global Constants ---
 MIN_FILE_SIZE = 1024
 REQUESTS_CONNECT_TIMEOUT = 15
-REQUESTS_READ_TIMEOUT = 300
-SELENIUM_PAGE_LOAD_TIMEOUT = 300
-SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 300
+REQUESTS_READ_TIMEOUT = 60  # Reduced from 300
+SELENIUM_PAGE_LOAD_TIMEOUT = 45 # Drastically reduced from 300
+SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 60 # Reduced from 300
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
@@ -168,36 +168,35 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     driver = None; selenium_temp_dir = None; path_written = None
     try:
         chrome_options = Options()
-
-        # --- FINAL UPDATED SECTION FOR PRODUCTION (STREAMLIT CLOUD) ---
-        # Checks for the most common executable names for Chromium on Linux.
-        # This makes the code robust for different system configurations.
         if os.path.exists("/usr/bin/chromium"):
             chrome_options.binary_location = "/usr/bin/chromium"
         elif os.path.exists("/usr/bin/chromium-browser"):
             chrome_options.binary_location = "/usr/bin/chromium-browser"
-        # ---------------------------------------------------------------
-
+        
         chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080"); chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}"); chrome_options.add_argument('--disable-extensions')
         selenium_temp_dir = tempfile.mkdtemp()
         prefs = {"download.default_directory": selenium_temp_dir, "download.prompt_for_download": False, "download.directory_upgrade": True, "plugins.always_open_pdf_externally": True}
         chrome_options.add_experimental_option("prefs", prefs)
         service = None
         try:
-            # For Streamlit Community Cloud, chromedriver should be in the PATH after installing from packages.txt
-            if os.path.exists("/home/appuser") or os.path.exists("/usr/bin/chromium-driver"):
+            if os.path.exists("/home/appuser"):
                 service = Service()
-            else: # For local development
+            else: 
                 service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
         except Exception as driver_error: return None, None, "SELENIUM_DRIVER_INIT_ERROR", str(driver_error)
 
-        if "bseindia.com" in url: driver.get("https://www.bseindia.com/"); time.sleep(random.uniform(1,2))
-        elif "nseindia.com" in url or "archives.nseindia.com" in url:
+        # --- MODIFIED STRATEGY ---
+        # For NSE, pre-warming the session on the main site is still helpful.
+        # For BSE, we now go directly to the target URL to avoid getting flagged on the homepage.
+        if "nseindia.com" in url or "archives.nseindia.com" in url:
             driver.get("https://www.nseindia.com/"); time.sleep(random.uniform(1,2))
             driver.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"); time.sleep(random.uniform(1,2))
+        
         driver.get(url)
+        # --- END MODIFIED STRATEGY ---
+
         dl_temp_file_path = None; start_time = time.time()
         while time.time() - start_time < SELENIUM_DOWNLOAD_WAIT_TIMEOUT:
             completed_files = [f for f in os.listdir(selenium_temp_dir) if not f.endswith(('.crdownload', '.tmp', '.part'))]
@@ -263,7 +262,10 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req: return path_req, content_req, None, None
-    st.write(f"Requests failed for {base_name_no_ext} ({detail_req}). Trying with browser automation...") # Add some debug info
+    
+    # This status message is useful for debugging. You might remove it for a cleaner final UI.
+    st.info(f"Requests failed for '{base_name_no_ext}'. Trying with browser automation (this may take up to a minute)...")
+    
     path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
     if path_sel and content_sel: return path_sel, content_sel, None, None
     if error_sel == "SELENIUM_DRIVER_INIT_ERROR": return None, None, "SELENIUM_DRIVER_INIT_ERROR", detail_sel
@@ -293,6 +295,11 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
                 file_contents_for_zip[filename_for_zip] = content_bytes; downloaded_successfully_count += 1
             else:
                 failed_count += 1
+                # Improve error detail for timeouts
+                if "Timeout" in str(error_detail_str):
+                    error_marker = "DOWNLOAD_TIMED_OUT"
+                    error_detail_str = f"The connection to the source timed out after {SELENIUM_PAGE_LOAD_TIMEOUT} seconds. The site may be blocking automated access."
+                
                 failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name_for_file, 'reason': error_marker, 'reason_detail': error_detail_str})
                 if error_marker == "SELENIUM_DRIVER_INIT_ERROR" and not selenium_driver_init_error_shown_this_run:
                     st.error(f"Critical Setup Error: Could not initialize browser driver. Details: {error_detail_str}. Downloads requiring browser automation may fail.")
@@ -373,7 +380,8 @@ def main():
                         reason = failure.get('reason', 'Unknown Failure')
                         detail = failure.get('reason_detail')
                         msg = f"Could not download {failure['type']}: '{failure['base_name']}'."
-                        if reason == "SELENIUM_DRIVER_INIT_ERROR": msg += " Affected by critical browser driver initialization failure." # Detail already shown by st.error
+                        if reason == "DOWNLOAD_TIMED_OUT": msg += f" {detail}" # Custom timeout message
+                        elif reason == "SELENIUM_DRIVER_INIT_ERROR": msg += " Affected by critical browser driver initialization failure."
                         elif reason.endswith("EXCEPTION") or reason == "LOOP_PROCESSING_ERROR": msg += f" An error occurred: {detail if detail else 'Undetermined error'}."
                         elif reason == "DOWNLOAD_FAILED_HTML_CONTENT": msg += f" Received HTML page instead of file. {detail if detail else ''}"
                         elif reason == "DOWNLOAD_FAILED_TOO_SMALL": msg += " Downloaded file was too small and considered invalid."
