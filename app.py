@@ -16,14 +16,17 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import tempfile
 import shutil
-# import traceback # For detailed server-side exception logging if needed
+
+# --- ADDED FOR SELENIUM-STEALTH ---
+from selenium_stealth import stealth
+# -----------------------------------
 
 # --- Global Constants ---
 MIN_FILE_SIZE = 1024
 REQUESTS_CONNECT_TIMEOUT = 15
-REQUESTS_READ_TIMEOUT = 60  # Reduced from 300
-SELENIUM_PAGE_LOAD_TIMEOUT = 45 # Drastically reduced from 300
-SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 60 # Reduced from 300
+REQUESTS_READ_TIMEOUT = 60
+SELENIUM_PAGE_LOAD_TIMEOUT = 45
+SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 60
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
@@ -173,10 +176,17 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
         elif os.path.exists("/usr/bin/chromium-browser"):
             chrome_options.binary_location = "/usr/bin/chromium-browser"
         
-        chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080"); chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}"); chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080");
+        # The User-Agent argument will be handled by selenium-stealth, so we can comment it out.
+        # chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}"); 
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+        
         selenium_temp_dir = tempfile.mkdtemp()
         prefs = {"download.default_directory": selenium_temp_dir, "download.prompt_for_download": False, "download.directory_upgrade": True, "plugins.always_open_pdf_externally": True}
         chrome_options.add_experimental_option("prefs", prefs)
+        
         service = None
         try:
             if os.path.exists("/home/appuser"):
@@ -184,74 +194,44 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
             else: 
                 service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            # --- APPLYING SELENIUM-STEALTH ---
+            # This makes the headless browser much harder to detect
+            stealth(driver,
+                    languages=["en-US", "en"],
+                    vendor="Google Inc.",
+                    platform="Win32",
+                    webgl_vendor="Intel Inc.",
+                    renderer="Intel Iris OpenGL Engine",
+                    fix_hairline=True,
+                    )
+            # ------------------------------------
+
             driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
         except Exception as driver_error: return None, None, "SELENIUM_DRIVER_INIT_ERROR", str(driver_error)
 
-        # --- MODIFIED STRATEGY ---
-        # For NSE, pre-warming the session on the main site is still helpful.
-        # For BSE, we now go directly to the target URL to avoid getting flagged on the homepage.
-        if "nseindia.com" in url or "archives.nseindia.com" in url:
-            driver.get("https://www.nseindia.com/"); time.sleep(random.uniform(1,2))
-            driver.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"); time.sleep(random.uniform(1,2))
-        
         driver.get(url)
-        # --- END MODIFIED STRATEGY ---
 
         dl_temp_file_path = None; start_time = time.time()
         while time.time() - start_time < SELENIUM_DOWNLOAD_WAIT_TIMEOUT:
             completed_files = [f for f in os.listdir(selenium_temp_dir) if not f.endswith(('.crdownload', '.tmp', '.part'))]
             if completed_files: dl_temp_file_path = os.path.join(selenium_temp_dir, sorted(completed_files, key=lambda f: os.path.getmtime(os.path.join(selenium_temp_dir, f)), reverse=True)[0]); break
             time.sleep(1)
+            
         if dl_temp_file_path and os.path.exists(dl_temp_file_path):
-            _, original_ext = os.path.splitext(os.path.basename(dl_temp_file_path))
-            if not original_ext or not (1 < len(original_ext) < 7):
-                mock_response = type('Response', (), {'headers': {}, 'text': driver.page_source})()
-                original_ext = get_extension_from_response(mock_response, url, doc_type)
-            file_name_with_ext = base_name_no_ext + original_ext.lower()
-            path_written = os.path.join(folder_path, file_name_with_ext)
-            with open(dl_temp_file_path, 'rb') as f_src, open(path_written, 'wb') as f_dst: content_bytes = f_src.read(); f_dst.write(content_bytes)
-            try: os.remove(dl_temp_file_path)
-            except OSError: pass
-            if len(content_bytes) >= MIN_FILE_SIZE: return path_written, content_bytes, None, None
-            else:
-                if os.path.exists(path_written): os.remove(path_written)
-                path_written = None
-        if doc_type != 'PPT':
-            try:
-                if "application/pdf" in driver.page_source.lower() or driver.current_url.lower().endswith(".pdf"):
-                    b64_src = driver.execute_script("var e=document.querySelector('embed[type=\"application/pdf\"]'); if(e)return e.src; var i=document.querySelector('iframe'); if(i&&i.src&&i.src.startsWith('data:application/pdf'))return i.src; return null;")
-                    if b64_src and b64_src.startswith("data:application/pdf;base64,"):
-                        content_bytes = base64.b64decode(b64_src.split(",")[1])
-                        path_written = os.path.join(folder_path, base_name_no_ext + ".pdf")
-                        with open(path_written, 'wb') as f: f.write(content_bytes)
-                        if len(content_bytes) >= MIN_FILE_SIZE: return path_written, content_bytes, None, None
-                        else:
-                            if os.path.exists(path_written): os.remove(path_written)
-                            path_written = None
-            except Exception: pass
-        try:
-            cookies_dict = {c['name']: c['value'] for c in driver.get_cookies()}
-            sel_req_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/pdf,text/html,*/*", "Referer": driver.current_url}
-            response = requests.get(url, headers=sel_req_headers, cookies=cookies_dict, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
-            response.raise_for_status()
-            file_ext = get_extension_from_response(response, url, doc_type)
-            path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
-            content_buffer = io.BytesIO()
-            with open(path_written, 'wb') as f:
-                for chunk in response.iter_content(8192):
-                    if chunk: f.write(chunk); content_buffer.write(chunk)
-            content_bytes = content_buffer.getvalue(); content_buffer.close()
-            if content_bytes.strip().startswith(b'<!DOCTYPE html') or content_bytes.strip().startswith(b'<html'):
-                if os.path.exists(path_written): os.remove(path_written)
-                return None, None, "DOWNLOAD_FAILED_HTML_CONTENT", None
-            if len(content_bytes) >= MIN_FILE_SIZE: return path_written, content_bytes, None, None
-            else:
-                if os.path.exists(path_written): os.remove(path_written)
-                return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
-        except requests.exceptions.RequestException as e_req_cookie: return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL_COOKIE", str(e_req_cookie)
-        finally:
-            if 'content_buffer' in locals() and hasattr(content_buffer, 'closed') and not content_buffer.closed: content_buffer.close()
-        return None, None, "DOWNLOAD_FAILED", None
+            with open(dl_temp_file_path, 'rb') as f_src:
+                content_bytes = f_src.read()
+            if len(content_bytes) >= MIN_FILE_SIZE:
+                 _, original_ext = os.path.splitext(os.path.basename(dl_temp_file_path))
+                 if not original_ext or not (1 < len(original_ext) < 7):
+                     mock_response = type('Response', (), {'headers': {}, 'text': driver.page_source})()
+                     original_ext = get_extension_from_response(mock_response, url, doc_type)
+                 file_name_with_ext = base_name_no_ext + original_ext.lower()
+                 path_written = os.path.join(folder_path, file_name_with_ext)
+                 with open(path_written, 'wb') as f_dst:
+                     f_dst.write(content_bytes)
+                 return path_written, content_bytes, None, None
+        return None, None, "DOWNLOAD_FAILED", "Selenium could not download the file."
     except Exception as e_sel_general: return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL_GENERAL", str(e_sel_general)
     finally:
         if driver: driver.quit()
@@ -263,19 +243,18 @@ def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req: return path_req, content_req, None, None
     
-    # This status message is useful for debugging. You might remove it for a cleaner final UI.
-    st.info(f"Requests failed for '{base_name_no_ext}'. Trying with browser automation (this may take up to a minute)...")
+    st.info(f"Requests failed for '{base_name_no_ext}'. Trying with stealth browser automation...")
     
     path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
     if path_sel and content_sel: return path_sel, content_sel, None, None
     if error_sel == "SELENIUM_DRIVER_INIT_ERROR": return None, None, "SELENIUM_DRIVER_INIT_ERROR", detail_sel
-    if error_sel and "EXCEPTION" in error_sel: return None, None, error_sel, detail_sel # Prioritize Selenium's exception detail
-    if error_req and "EXCEPTION" in error_req: return None, None, error_req, detail_req # Then Request's exception detail
+    if error_sel and "EXCEPTION" in error_sel: return None, None, error_sel, detail_sel
+    if error_req and "EXCEPTION" in error_req: return None, None, error_req, detail_req
     final_error = error_sel if error_sel else error_req if error_req else "DOWNLOAD_FAILED"
-    final_detail = detail_sel if error_sel else detail_req # Pass detail if any
+    final_detail = detail_sel if error_sel else detail_req
     return None, None, final_error, final_detail
 
-# --- Main Application Logic ---
+# --- Main Application Logic (Unchanged from previous version) ---
 def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text_area):
     file_contents_for_zip = {}; failed_downloads_details = []
     filtered_links = [link for link in links if link['type'] in doc_types]
@@ -295,14 +274,13 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
                 file_contents_for_zip[filename_for_zip] = content_bytes; downloaded_successfully_count += 1
             else:
                 failed_count += 1
-                # Improve error detail for timeouts
                 if "Timeout" in str(error_detail_str):
                     error_marker = "DOWNLOAD_TIMED_OUT"
-                    error_detail_str = f"The connection to the source timed out after {SELENIUM_PAGE_LOAD_TIMEOUT} seconds. The site may be blocking automated access."
+                    error_detail_str = f"Connection timed out after {SELENIUM_PAGE_LOAD_TIMEOUT}s. The site is likely blocking automated access."
                 
                 failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name_for_file, 'reason': error_marker, 'reason_detail': error_detail_str})
                 if error_marker == "SELENIUM_DRIVER_INIT_ERROR" and not selenium_driver_init_error_shown_this_run:
-                    st.error(f"Critical Setup Error: Could not initialize browser driver. Details: {error_detail_str}. Downloads requiring browser automation may fail.")
+                    st.error(f"Critical Setup Error: Could not initialize browser driver. Details: {error_detail_str}.")
                     selenium_driver_init_error_shown_this_run = True
             current_progress_val = min((i + 1) * progress_step, 1.0)
             progress_bar.progress(current_progress_val)
@@ -311,8 +289,7 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
         except Exception as e_loop:
             failed_count += 1
             failed_downloads_details.append({'url': link_info.get('url', 'N/A'), 'type': link_info.get('type', 'Unknown'), 'base_name': base_name_for_file, 'reason': "LOOP_PROCESSING_ERROR", 'reason_detail': str(e_loop)})
-            current_progress_val = min((i + 1) * progress_step, 1.0)
-            progress_bar.progress(current_progress_val)
+            progress_bar.progress(min((i + 1) * progress_step, 1.0))
             status_text_area.text(f"Processing: {i+1}/{total_files_to_attempt} | Downloaded: {downloaded_successfully_count} | Failed: {failed_count}")
     return file_contents_for_zip, failed_downloads_details
 
@@ -380,7 +357,7 @@ def main():
                         reason = failure.get('reason', 'Unknown Failure')
                         detail = failure.get('reason_detail')
                         msg = f"Could not download {failure['type']}: '{failure['base_name']}'."
-                        if reason == "DOWNLOAD_TIMED_OUT": msg += f" {detail}" # Custom timeout message
+                        if reason == "DOWNLOAD_TIMED_OUT": msg += f" {detail}"
                         elif reason == "SELENIUM_DRIVER_INIT_ERROR": msg += " Affected by critical browser driver initialization failure."
                         elif reason.endswith("EXCEPTION") or reason == "LOOP_PROCESSING_ERROR": msg += f" An error occurred: {detail if detail else 'Undetermined error'}."
                         elif reason == "DOWNLOAD_FAILED_HTML_CONTENT": msg += f" Received HTML page instead of file. {detail if detail else ''}"
@@ -396,8 +373,6 @@ def main():
         st.caption("StockLib is a tool for educational purposes only. Not financial advice.")
     except Exception as e:
         st.error(f"A critical application error occurred: {str(e)}. Please refresh and try again.")
-        # import sys, traceback # For server-side debugging
-        # print(f"CRITICAL APP ERROR: {e}\n{traceback.format_exc()}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
