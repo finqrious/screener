@@ -210,6 +210,7 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
 
         # Rest of your selenium code remains the same...
         # [Continue with the existing selenium logic]
+
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req: return path_req, content_req, None, None
