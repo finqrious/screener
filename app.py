@@ -16,11 +16,29 @@ REQUESTS_CONNECT_TIMEOUT = 15
 REQUESTS_READ_TIMEOUT = 180
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
-# --- Helper Functions (Unchanged) ---
+def get_realistic_headers(user_agent):
+    """Generate realistic browser headers"""
+    return {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0"
+    }
+
+# --- Helper Functions ---
 def get_extension_from_response(response, url, doc_type_for_default):
     content_disposition = response.headers.get('Content-Disposition')
     if content_disposition:
@@ -46,11 +64,12 @@ def format_filename_base(date_str, doc_type):
     clean_date = re.sub(r'[^\w\.-]', '_', date_str)
     return f"{clean_date}_{doc_type}"
 
-# --- Core Web Interaction and Parsing (Unchanged) ---
+# --- Core Web Interaction and Parsing ---
 def get_webpage_content(stock_name):
     url = f"https://www.screener.in/company/{stock_name}/consolidated/#documents"
     try:
-        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        user_agent = random.choice(USER_AGENTS)
+        headers = get_realistic_headers(user_agent)
         response = requests.get(url, headers=headers, timeout=REQUESTS_CONNECT_TIMEOUT)
         response.raise_for_status()
         return response.text
@@ -74,47 +93,112 @@ def parse_html_content(html_content):
                 if doc_type: all_links.append({'date': str(date_str), 'type': doc_type, 'url': link_tag['href']})
     return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
-# --- NEW AND FINAL ROBUST DOWNLOAD LOGIC ---
-def download_file_attempt(url, base_name_no_ext, doc_type):
+def create_bse_session():
+    """Create a properly initialized BSE session"""
     session = requests.Session()
-    session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
+    user_agent = random.choice(USER_AGENTS)
+    session.headers.update(get_realistic_headers(user_agent))
+    
+    # Step 1: Visit BSE homepage to get initial cookies
+    try:
+        session.get("https://www.bseindia.com/", timeout=REQUESTS_CONNECT_TIMEOUT)
+        time.sleep(random.uniform(1, 2))
+    except:
+        pass  # Continue even if homepage fails
+    
+    return session
+
+def navigate_bse_flow(session, scrip_code):
+    """Navigate through BSE pages to establish proper session"""
+    urls_to_visit = [
+        f"https://www.bseindia.com/corporates/List_Scrips.aspx",
+        f"https://www.bseindia.com/corporates/ann.html?scrip={scrip_code}",
+        f"https://www.bseindia.com/corporates/comp-anmnt.aspx"
+    ]
+    
+    for url in urls_to_visit:
+        try:
+            response = session.get(url, timeout=REQUESTS_CONNECT_TIMEOUT)
+            if response.status_code == 200:
+                time.sleep(random.uniform(0.8, 1.5))
+        except:
+            continue  # Continue with next URL if one fails
+
+def download_bse_annual_report(session, original_url, pname_value, scrip_code):
+    """Enhanced BSE annual report download with proper navigation"""
+    
+    # Navigate through BSE flow
+    navigate_bse_flow(session, scrip_code)
+    
+    # Set proper referer
+    referer_url = f"https://www.bseindia.com/corporates/ann.html?scrip={scrip_code}"
+    session.headers.update({
+        "Referer": referer_url,
+        "Accept": "application/pdf,application/x-pdf,*/*",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin"
+    })
+    
+    # Try multiple download URL patterns
+    download_urls = [
+        f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}",
+        f"https://www.bseindia.com/xml-data/corpfiling/AttachHist/{pname_value}",
+        original_url  # Fallback to original
+    ]
+    
+    for download_url in download_urls:
+        try:
+            time.sleep(random.uniform(1, 2))  # Respectful delay
+            response = session.get(download_url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+            
+            if response.status_code == 200:
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'application/pdf' in content_type or 'binary' in content_type:
+                    return response
+            
+        except requests.exceptions.RequestException:
+            continue
+    
+    return None
+
+# --- Enhanced Download Logic ---
+def download_file_attempt(url, base_name_no_ext, doc_type):
+    session = create_bse_session()
 
     try:
-        # Special handling for BSE Annual Reports
+        # Enhanced BSE Annual Reports handling
         if "bseindia.com" in url and "AnnPdfOpen.aspx" in url:
-            # Step 0: Parse the URL to get the attachment ID (Pname)
             pname_match = re.search(r'Pname=([^&]+)', url)
             if not pname_match:
                 return None, None, "DOWNLOAD_FAILED", "Could not parse BSE URL."
             pname_value = pname_match.group(1)
-
-            # Step 1: Visit the homepage to initialize a session and get cookies
-            session.get("https://www.bseindia.com/", timeout=REQUESTS_CONNECT_TIMEOUT)
-            time.sleep(random.uniform(0.5, 1)) # Be a polite scraper
-
-            # Step 2: Visit the announcements page, which is the legitimate Referer
-            # This step is CRUCIAL for getting the right session cookies
+            
             scrip_code_match = re.search(r'scripcode=(\d+)', url, re.IGNORECASE)
-            scrip_code = scrip_code_match.group(1) if scrip_code_match else "500000" # Use a default if not found
-            referer_url = f"https://www.bseindia.com/corporates/ann.html?scrip={scrip_code}"
-            session.get(referer_url, timeout=REQUESTS_CONNECT_TIMEOUT)
-            time.sleep(random.uniform(0.5, 1))
-
-            # Step 3: Now, with a "warmed-up" session, hit the direct download link
-            download_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
-            session.headers.update({"Referer": referer_url}) # Set the referer for good measure
-            response = session.get(download_url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+            scrip_code = scrip_code_match.group(1) if scrip_code_match else "500000"
+            
+            response = download_bse_annual_report(session, url, pname_value, scrip_code)
+            
+            if not response:
+                return None, None, "DOWNLOAD_FAILED", "BSE access denied after navigation attempts."
 
         else:
-            # For all other links (NSE, company sites, etc.), a direct request is usually fine.
+            # For all other links (NSE, company sites, etc.)
+            session.headers.update({
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Sec-Fetch-Dest": "document"
+            })
             response = session.get(url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
 
         response.raise_for_status()
 
-        # Final checks on the response content
+        # Validate response content
         content_type = response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
-            return None, None, "DOWNLOAD_FAILED_HTML", "Server returned an HTML page."
+            # Check if it's an error page
+            content_preview = response.content[:1000].decode('utf-8', errors='ignore').lower()
+            if any(error_text in content_preview for error_text in ['error', 'forbidden', 'access denied', 'not found']):
+                return None, None, "DOWNLOAD_FAILED_HTML", "Server returned an error page."
 
         content = response.content
         if len(content) < MIN_FILE_SIZE:
@@ -126,7 +210,8 @@ def download_file_attempt(url, base_name_no_ext, doc_type):
 
     except requests.exceptions.RequestException as e:
         return None, None, "DOWNLOAD_FAILED", str(e)
-
+    finally:
+        session.close()
 
 # --- Main Application Logic ---
 def download_selected_documents(links, doc_types, progress_bar, status_text_area):
@@ -146,7 +231,7 @@ def download_selected_documents(links, doc_types, progress_bar, status_text_area
             failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name, 'reason': error, 'reason_detail': detail})
         
         progress_bar.progress((i + 1) / total_to_attempt)
-        time.sleep(0.1)
+        time.sleep(random.uniform(0.5, 1.5))  # Respectful delays between downloads
     return file_contents_for_zip, failed_downloads_details
 
 def create_zip_in_memory(file_contents_dict):
