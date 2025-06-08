@@ -15,597 +15,395 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import tempfile
+import shutil
+# import sys # No longer needed for print to stderr for these errors
+# import traceback # For detailed server-side exception logging if needed
 
+# --- Global Constants ---
+MIN_FILE_SIZE = 1024
+REQUESTS_CONNECT_TIMEOUT = 15
+REQUESTS_READ_TIMEOUT = 300
+SELENIUM_PAGE_LOAD_TIMEOUT = 300
+SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 300
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
+]
+
+# --- Helper Functions ---
+def get_extension_from_response(response, url, doc_type_for_default):
+    content_disposition = response.headers.get('Content-Disposition')
+    if content_disposition:
+        filenames = re.findall(r'filename\*?=(?:UTF-\d{1,2}\'\'|")?([^";\s]+)', content_disposition, re.IGNORECASE)
+        if filenames:
+            parsed_filename = urllib.parse.unquote(filenames[-1].strip('"'))
+            _, ext = os.path.splitext(parsed_filename)
+            if ext and 1 < len(ext) < 7:
+                return ext.lower()
+    content_type = response.headers.get('Content-Type')
+    if content_type:
+        ct = content_type.split(';')[0].strip().lower()
+        mime_to_ext = {
+            'application/pdf': '.pdf',
+            'application/vnd.ms-powerpoint': '.ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+            'application/msword': '.doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+            'application/zip': '.zip', 'application/x-zip-compressed': '.zip',
+            'text/csv': '.csv',
+        }
+        if ct in mime_to_ext: return mime_to_ext[ct]
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        _, ext_from_url = os.path.splitext(parsed_url.path)
+        if ext_from_url and 1 < len(ext_from_url) < 7: return ext_from_url.lower()
+    except Exception: pass
+    if doc_type_for_default == 'PPT': return '.pptx'
+    elif doc_type_for_default == 'Transcript': return '.pdf'
+    return '.pdf'
+
+def format_filename_base(date_str, doc_type):
+    if re.match(r'^\d{4}$', date_str): return f"{date_str}_{doc_type}"
+    if re.match(r'^\d{4}-\d{2}$', date_str):
+        year, month = date_str.split('-')
+        return f"{year}_{month}_{doc_type}"
+    if re.match(r'^\d{2}/\d{2}/\d{4}$', date_str):
+        day, month, year = date_str.split('/')
+        return f"{year}_{month}_{day}_{doc_type}"
+    clean_date = re.sub(r'[^\w\.-]', '_', date_str)
+    return f"{clean_date}_{doc_type}"
+
+# --- Core Web Interaction and Parsing ---
 def get_webpage_content(stock_name):
     url = f"https://www.screener.in/company/{stock_name}/consolidated/#documents"
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers)
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        response = requests.get(url, headers=headers, timeout=REQUESTS_CONNECT_TIMEOUT)
         response.raise_for_status()
         return response.text
-    except requests.exceptions.RequestException as e:
-        if "404" in str(e):
-            st.error(f"Stock '{stock_name}' not found. Please check the ticker symbol.")
-        elif "Connection" in str(e):
-            st.error("Unable to connect. Please check your internet connection.")
-        else:
-            st.error(f"Error: Unable to fetch data for '{stock_name}'. Please try again later.")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404: st.error(f"Stock '{stock_name}' not found on Screener. Check ticker.")
+        else: st.error(f"HTTP error fetching Screener page for '{stock_name}'. Status: {e.response.status_code}.")
         return None
+    except requests.exceptions.ConnectionError: st.error(f"Connection error for '{stock_name}'. Check internet."); return None
+    except requests.exceptions.Timeout: st.error(f"Timeout fetching page for '{stock_name}'. Server slow."); return None
+    except requests.exceptions.RequestException as e: st.error(f"Error fetching data for '{stock_name}': {str(e)}. Try again."); return None # Show exception in UI
 
 def parse_html_content(html_content):
-    if not html_content:
-        return []
-        
+    if not html_content: return []
     soup = BeautifulSoup(html_content, 'html.parser')
-
     all_links = []
-    
-    # Annual Reports
     annual_reports = soup.select('.annual-reports ul.list-links li a')
     for link in annual_reports:
-        year = re.search(r'Financial Year (\d{4})', link.text.strip())
-        if year:
-            all_links.append({'date': year.group(1), 'type': 'Annual_Report', 'url': link['href']})
-
-    # Concall Transcripts and PPTs
+        year_match = re.search(r'Financial Year (\d{4})', link.text.strip())
+        if year_match: all_links.append({'date': year_match.group(1), 'type': 'Annual_Report', 'url': link['href']})
     concall_items = soup.select('.concalls ul.list-links li')
     for item in concall_items:
         date_div = item.select_one('.ink-600.font-size-15')
         if date_div:
             date_text = date_div.text.strip()
-            try:
-                date_obj = datetime.strptime(date_text, '%b %Y')
-                date = date_obj.strftime('%Y-%m')
-            except:
-                date = date_text
-                
-            for link in item.find_all('a', class_='concall-link'):
-                if 'Transcript' in link.text:
-                    all_links.append({'date': date, 'type': 'Transcript', 'url': link['href']})
-                elif 'PPT' in link.text:
-                    all_links.append({'date': date, 'type': 'PPT', 'url': link['href']})
-
+            try: date_obj = datetime.strptime(date_text, '%b %Y'); date_str = date_obj.strftime('%Y-%m')
+            except ValueError: date_str = date_text
+            for link_tag in item.find_all('a', class_='concall-link'):
+                if 'Transcript' in link_tag.text: all_links.append({'date': date_str, 'type': 'Transcript', 'url': link_tag['href']})
+                elif 'PPT' in link_tag.text: all_links.append({'date': date_str, 'type': 'PPT', 'url': link_tag['href']})
     return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
-def format_filename(date_str, doc_type):
-    # If date is just a year (e.g., "2023")
-    if re.match(r'^\d{4}$', date_str):
-        return f"{date_str}_{doc_type}.pdf"
-    
-    # If date is in YYYY-MM format
-    if re.match(r'^\d{4}-\d{2}$', date_str):
-        year, month = date_str.split('-')
-        return f"{year}_{month}_{doc_type}.pdf"
-    
-    # If date is in DD/MM/YYYY format, convert to YYYY_MM_DD
-    if re.match(r'^\d{2}/\d{2}/\d{4}$', date_str):
-        day, month, year = date_str.split('/')
-        return f"{year}_{month}_{day}_{doc_type}.pdf"
-    
-    # For any other format, just replace spaces and slashes with underscores
-    clean_date = date_str.replace(' ', '_').replace('/', '_')
-    return f"{clean_date}_{doc_type}.pdf"
-
-# Add this function to handle Selenium-based downloads
-def download_with_selenium(url, folder_path, file_name):
-    driver = None # Initialize driver to None
-    temp_dir = None # Initialize temp_dir to None
+# --- Download Functions (Return path, content, error_marker, error_detail_str) ---
+def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
+    path_written = None; content_buffer = io.BytesIO(); session = requests.Session()
+    req_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8,application/pdf,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation", "Accept-Language": "en-US,en;q=0.5", "DNT": "1", "Connection": "keep-alive", "Upgrade-Insecure-Requests": "1"}
     try:
-        # Set up Chrome options
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--window-size=1920,1080")
-        
-        # Add random user agent
-        user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15"
-        ]
-        chrome_options.add_argument(f"--user-agent={random.choice(user_agents)}")
-        
-        # Set up download preferences
-        temp_dir = tempfile.mkdtemp()
-        prefs = {
-            "download.default_directory": temp_dir,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
-        
-        # Fix the ChromeDriverManager issue - the error message suggests the issue is in install()
-        # The current try/except handles the fallback, so we'll keep it.
-        # The user might need to update webdriver-manager if this persists.
-        try:
-            driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=chrome_options
-            )
-        except Exception as driver_error:
-            st.warning(f"Chrome driver error: {str(driver_error)}. Falling back to requests method.")
-            # Indicate failure so download_pdf can use requests
-            return None, None
-
-        # First visit the main site to get cookies
+        current_headers = req_headers.copy(); response = None # Default response
+        # ... (BSE/NSE specific logic as before) ...
         if "bseindia.com" in url:
-            driver.get("https://www.bseindia.com/")
-            time.sleep(3)  # Increased wait time
-        elif "nseindia.com" in url or "archives.nseindia.com" in url:
-            # Enhanced NSE handling - visit multiple pages
-            driver.get("https://www.nseindia.com/")
-            time.sleep(3)
-            driver.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports")
-            time.sleep(3)
-            
-        # Now navigate to the actual URL
-        driver.get(url)
-        
-        # --- Download Detection Logic ---
-        # Wait for a file to appear in the download directory for up to 30 seconds
-        download_timeout = 30
-        start_time = time.time()
-        downloaded_file_path = None
-
-        while time.time() - start_time < download_timeout:
-            downloaded_files = os.listdir(temp_dir)
-            # Look for files that are not partial downloads (e.g., .crdownload)
-            completed_files = [f for f in downloaded_files if not f.endswith('.crdownload')]
-            if completed_files:
-                # Assuming the first completed file is the one we want
-                downloaded_file_path = os.path.join(temp_dir, completed_files[0])
-                break
-            time.sleep(1) # Wait a bit before checking again
-
-        # Check if a file was successfully downloaded
-        if downloaded_file_path and os.path.exists(downloaded_file_path):
-             # Read the content
-            with open(downloaded_file_path, 'rb') as file:
-                content = file.read()
-            
-            # Save to the target location
-            final_file_path = os.path.join(folder_path, file_name)
-            with open(final_file_path, 'wb') as file:
-                file.write(content)
-            
-            # Clean up temp file
-            os.remove(downloaded_file_path)
-            
-            # Check content size before returning
-            if len(content) > 100: # Use the same size check as in download_selected_documents
-                 return final_file_path, content
-            else:
-                 st.warning(f"Downloaded file {file_name} is too small ({len(content)} bytes). Treating as failed.")
-                 return None, None # Treat as failed download
-
-        # If no file was downloaded to temp directory, try getting content via base64 embed (less reliable)
-        try:
-            # Check if we're on a PDF page and try to get base64 content
-            if "application/pdf" in driver.page_source or driver.current_url.lower().endswith(".pdf"):
-                 pdf_content_base64 = driver.execute_script("return document.querySelector('embed').src")
-                 if pdf_content_base64 and pdf_content_base64.startswith("data:application/pdf;base64,"):
-                     pdf_data = pdf_content_base64.split(",")[1]
-                     content = base64.b64decode(pdf_data)
-                     
-                     # Save the file
-                     final_file_path = os.path.join(folder_path, file_name)
-                     with open(final_file_path, 'wb') as file:
-                         file.write(content)
-                     
-                     # Check content size before returning
-                     if len(content) > 100:
-                         return final_file_path, content
-                     else:
-                         st.warning(f"Extracted base64 content for {file_name} is too small ({len(content)} bytes). Treating as failed.")
-                         return None, None
-                 else:
-                     st.warning(f"Could not extract base64 PDF content for {url}.")
-        except Exception as base64_error:
-            st.warning(f"Error extracting base64 content for {url}: {str(base64_error)}")
-            pass # Continue if base64 extraction fails
-
-        # If neither download nor base64 extraction worked, try getting content via requests with Selenium cookies
-        try:
-            cookies = driver.get_cookies()
-            
-            # Convert Selenium cookies to requests format
-            cookies_dict = {cookie['name']: cookie['value'] for cookie in cookies}
-            
-            # Make request with the cookies
-            headers = {
-                "User-Agent": random.choice(user_agents),
-                "Accept": "application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8", # Adjust accept header
-                "Accept-Language": "en-US,en;q=0.5",
-                "Referer": driver.current_url, # Use the current URL as referrer
-                "Connection": "keep-alive",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "same-origin" if "bseindia.com" in url or "nseindia.com" in url else "none"
-            }
-            
-            response = requests.get(url, headers=headers, cookies=cookies_dict, stream=True, timeout=50)
-            response.raise_for_status()
-            
-            final_file_path = os.path.join(folder_path, file_name)
-            content = response.content
-            
-            # Check if content looks like an error page (e.g., HTML instead of PDF)
-            if content.strip().startswith(b'<!DOCTYPE html') or content.strip().startswith(b'<html'):
-                 st.warning(f"Downloaded content via requests+cookies for {url} appears to be an HTML page, not a PDF.")
-                 return None, None # Treat as failed download
-
-            with open(final_file_path, 'wb') as file:
-                file.write(content)
-            
-            # Check content size before returning
-            if len(content) > 100:
-                 return final_file_path, content
-            else:
-                 st.warning(f"Downloaded content via requests+cookies for {file_name} is too small ({len(content)} bytes). Treating as failed.")
-                 return None, None
-
-        except Exception as requests_cookie_error:
-            st.error(f"Requests+cookies download error for {url}: {str(requests_cookie_error)}")
-            return None, None # Indicate failure
-
-        # If none of the methods worked
-        st.error(f"Failed to download {url} using all methods.")
-        return None, None
-        
-    except Exception as e:
-        st.error(f"Selenium download error for {url}: {str(e)}")
-        return None, None # Indicate failure
-    finally:
-        # Ensure driver is quit and temp directory is cleaned up
-        if driver:
-            driver.quit()
-        if temp_dir and os.path.exists(temp_dir):
-             try:
-                 # Clean up any remaining files in the temp directory
-                 for f in os.listdir(temp_dir):
-                     os.remove(os.path.join(temp_dir, f))
-                 os.rmdir(temp_dir)
-             except Exception as cleanup_error:
-                 st.warning(f"Error cleaning up temp directory {temp_dir}: {cleanup_error}")
-
-# Add this new function for requests-based downloads
-def download_with_requests(url, folder_path, file_name):
-    try:
-        # More comprehensive browser-like headers
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Cache-Control": "max-age=0",
-            "Sec-Fetch-Dest": "document", # Add more sec-fetch headers
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none", # Start with none, might change later
-            "Sec-Fetch-User": "?1"
-        }
-        
-        # Create a session to maintain cookies
-        session = requests.Session()
-        
-        # Special handling for BSE India URLs
-        if "bseindia.com" in url:
-            # Visit the BSE homepage first to get cookies
-            session.get("https://www.bseindia.com/", headers=headers)
-            headers["Referer"] = "https://www.bseindia.com/" # Set referrer after visiting homepage
-            headers["Sec-Fetch-Site"] = "same-origin" # Change sec-fetch-site
-            
-            # If it's an AnnPdfOpen URL, we need to handle it differently
+            session.get("https://www.bseindia.com/", headers=current_headers, timeout=REQUESTS_CONNECT_TIMEOUT); time.sleep(random.uniform(0.5, 1.5))
+            current_headers["Referer"] = "https://www.bseindia.com/"; current_headers["Sec-Fetch-Site"] = "same-origin"
             if "AnnPdfOpen.aspx" in url:
-                # Extract the Pname parameter
-                pname = re.search(r'Pname=([^&]+)', url)
-                if pname:
-                    pname_value = pname.group(1)
-                    
-                    # Construct a different URL that might work better
-                    alt_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
-                    
-                    # Try the alternative URL
+                pname_match = re.search(r'Pname=([^&]+)', url)
+                if pname_match:
+                    pname_value = pname_match.group(1); alt_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
+                    bse_ann_headers = current_headers.copy(); bse_ann_headers["Referer"] = f"https://www.bseindia.com/corporates/ann.html?scrip={pname_value[:6]}"
                     try:
-                        # Use headers with referrer pointing to stock page
-                        alt_headers = headers.copy()
-                        alt_headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
-                        response = session.get(alt_url, headers=alt_headers, stream=True, timeout=50)
+                        response = session.get(alt_url, headers=bse_ann_headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
                         response.raise_for_status()
-                    except:
-                        # If that fails, try the original with modified headers
-                        # Use headers with referrer pointing to stock page
-                        original_headers = headers.copy()
-                        original_headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
-                        response = session.get(url, headers=original_headers, stream=True, timeout=50)
+                    except requests.exceptions.RequestException:
+                        response = session.get(url, headers=bse_ann_headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
                         response.raise_for_status()
-                else:
-                    # If we can't extract Pname, try the original URL with modified headers
-                    original_headers = headers.copy()
-                    original_headers["Referer"] = "https://www.bseindia.com/stock-share-price/"
-                    response = session.get(url, headers=original_headers, stream=True, timeout=50)
-                    response.raise_for_status()
-            else:
-                # For other BSE URLs, use headers with referrer pointing to homepage
-                response = session.get(url, headers=headers, stream=True, timeout=50)
-                response.raise_for_status()
+                else: response = session.get(url, headers=current_headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT)); response.raise_for_status()
+            else: response = session.get(url, headers=current_headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT)); response.raise_for_status()
         elif "nseindia.com" in url or "archives.nseindia.com" in url:
-            # Enhanced NSE handling - visit multiple NSE pages to get proper cookies
-            headers["Referer"] = "https://www.nseindia.com/" # Set initial referrer
-            headers["Sec-Fetch-Site"] = "same-origin" # Change sec-fetch-site
-            
-            # Visit multiple NSE pages to get proper cookies
-            session.get("https://www.nseindia.com/", headers=headers)
-            time.sleep(1)
-            # Update referrer for the next visit
-            headers["Referer"] = "https://www.nseindia.com/"
-            session.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports", headers=headers)
-            time.sleep(1)
-            
-            # Now try the actual download URL
-            # Use headers with referrer pointing to the filings page
-            download_headers = headers.copy()
-            download_headers["Referer"] = "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"
-            download_headers["Accept"] = "application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" # Adjust accept header for PDF
-            download_headers["Sec-Fetch-Dest"] = "document" # Should be document for PDF
-            
-            response = session.get(url, headers=download_headers, stream=True, timeout=50)
-            response.raise_for_status()
-        else:
-            # For non-BSE/NSE URLs
-            response = session.get(url, headers=headers, stream=True, timeout=50)
-            response.raise_for_status()
+            nse_initial_headers = current_headers.copy()
+            session.get("https://www.nseindia.com/", headers=nse_initial_headers, timeout=REQUESTS_CONNECT_TIMEOUT); time.sleep(random.uniform(0.5, 1.5))
+            nse_download_headers = current_headers.copy(); nse_download_headers["Referer"] = "https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"; nse_download_headers["Sec-Fetch-Site"] = "same-origin"
+            session.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports", headers=nse_download_headers, timeout=REQUESTS_CONNECT_TIMEOUT); time.sleep(random.uniform(0.5, 1.5))
+            response = session.get(url, headers=nse_download_headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT)); response.raise_for_status()
+        else: response = session.get(url, headers=current_headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT)); response.raise_for_status()
 
-        file_path = os.path.join(folder_path, file_name)
-        content = response.content  # Store content before writing to file
-        
-        # Check if content looks like an error page (e.g., HTML instead of PDF)
-        # Simple check: if it starts with '<!DOCTYPE html' or '<html'
+        file_ext = get_extension_from_response(response, url, doc_type)
+        file_name_with_ext = base_name_no_ext + file_ext
+        path_written = os.path.join(folder_path, file_name_with_ext)
+        with open(path_written, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk: f.write(chunk); content_buffer.write(chunk)
+        content = content_buffer.getvalue()
         if content.strip().startswith(b'<!DOCTYPE html') or content.strip().startswith(b'<html'):
-             st.warning(f"Downloaded content for {url} appears to be an HTML page, not a PDF.")
-             return None, None # Treat as failed download
-
-        with open(file_path, 'wb') as file:
-            file.write(content)
-
-        return file_path, content
+             if os.path.exists(path_written): os.remove(path_written)
+             return None, None, "DOWNLOAD_FAILED_HTML_CONTENT", None
+        if len(content) < MIN_FILE_SIZE:
+            if os.path.exists(path_written): os.remove(path_written)
+            return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
+        return path_written, content, None, None # Success
     except requests.exceptions.RequestException as e:
-        st.error(f"Error downloading {url}: {e}")
-        return None, None
+        return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
+    finally:
+        if hasattr(content_buffer, 'closed') and not content_buffer.closed: content_buffer.close()
+        if path_written and os.path.exists(path_written) and ('content' not in locals() or not content or len(content) < MIN_FILE_SIZE):
+            try: os.remove(path_written)
+            except OSError: pass
 
-def download_pdf(url, folder_path, file_name):
-    # For BSE and NSE URLs, try requests first (more reliable than Selenium in this case)
-    if "bseindia.com" in url or "nseindia.com" in url or "archives.nseindia.com" in url:
-        # Try regular requests method
-        result = download_with_requests(url, folder_path, file_name)
-        if result and result[0]:  # If successful (check result is not None and path exists)
-            return result
-        # If requests failed, try Selenium as fallback
-        st.info(f"Requests failed for {url}. Trying Selenium.") # Add info message for fallback
-        return download_with_selenium(url, folder_path, file_name)
+def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
+    driver = None; selenium_temp_dir = None; path_written = None
+    try:
+        chrome_options = Options()
+        chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080"); chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
+        selenium_temp_dir = tempfile.mkdtemp()
+        prefs = {"download.default_directory": selenium_temp_dir, "download.prompt_for_download": False, "download.directory_upgrade": True, "plugins.always_open_pdf_externally": True}
+        chrome_options.add_experimental_option("prefs", prefs)
+        try:
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+            driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
+        except Exception as driver_error:
+            return None, None, "SELENIUM_DRIVER_INIT_ERROR", str(driver_error)
+
+        # Pre-visit logic
+        if "bseindia.com" in url: driver.get("https://www.bseindia.com/"); time.sleep(random.uniform(1,2))
+        elif "nseindia.com" in url or "archives.nseindia.com" in url:
+            driver.get("https://www.nseindia.com/"); time.sleep(random.uniform(1,2))
+            driver.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"); time.sleep(random.uniform(1,2))
+        driver.get(url)
+
+        dl_temp_file = None; start_time = time.time()
+        while time.time() - start_time < SELENIUM_DOWNLOAD_WAIT_TIMEOUT:
+            completed_files = [f for f in os.listdir(selenium_temp_dir) if not f.endswith(('.crdownload', '.tmp', '.part'))]
+            if completed_files: dl_temp_file = os.path.join(selenium_temp_dir, sorted(completed_files, key=lambda f: os.path.getsize(os.path.join(selenium_temp_dir, f)), reverse=True)[0]); break
+            time.sleep(1)
+        if dl_temp_file and os.path.exists(dl_temp_file):
+            _, original_ext = os.path.splitext(os.path.basename(dl_temp_file))
+            if not original_ext or not (1 < len(original_ext) < 7):
+                mock_response = type('Response', (), {'headers': {}, 'text': driver.page_source})()
+                original_ext = get_extension_from_response(mock_response, url, doc_type)
+            file_name_with_ext = base_name_no_ext + original_ext.lower()
+            path_written = os.path.join(folder_path, file_name_with_ext)
+            with open(dl_temp_file, 'rb') as f_src, open(path_written, 'wb') as f_dst: content = f_src.read(); f_dst.write(content)
+            try: os.remove(dl_temp_file)
+            except OSError: pass
+            if len(content) >= MIN_FILE_SIZE: return path_written, content, None, None
+            else:
+                if os.path.exists(path_written): os.remove(path_written)
+                path_written = None
+
+        if doc_type != 'PPT':
+            try:
+                if "application/pdf" in driver.page_source.lower() or driver.current_url.lower().endswith(".pdf"):
+                    b64_src = driver.execute_script("var e=document.querySelector('embed[type=\"application/pdf\"]'); if(e)return e.src; var i=document.querySelector('iframe'); if(i&&i.src&&i.src.startsWith('data:application/pdf'))return i.src; return null;")
+                    if b64_src and b64_src.startswith("data:application/pdf;base64,"):
+                        content = base64.b64decode(b64_src.split(",")[1])
+                        path_written = os.path.join(folder_path, base_name_no_ext + ".pdf")
+                        with open(path_written, 'wb') as f: f.write(content)
+                        if len(content) >= MIN_FILE_SIZE: return path_written, content, None, None
+                        else:
+                            if os.path.exists(path_written): os.remove(path_written)
+                            path_written = None
+            except Exception: pass
+
+        try:
+            cookies_dict = {c['name']: c['value'] for c in driver.get_cookies()}
+            sel_req_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/pdf,text/html,*/*", "Referer": driver.current_url}
+            response = requests.get(url, headers=sel_req_headers, cookies=cookies_dict, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+            response.raise_for_status()
+            file_ext = get_extension_from_response(response, url, doc_type)
+            path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
+            content_buffer = io.BytesIO()
+            with open(path_written, 'wb') as f:
+                for chunk in response.iter_content(8192):
+                    if chunk: f.write(chunk); content_buffer.write(chunk)
+            content = content_buffer.getvalue(); content_buffer.close()
+            if content.strip().startswith(b'<!DOCTYPE html') or content.strip().startswith(b'<html'):
+                if os.path.exists(path_written): os.remove(path_written)
+                return None, None, "DOWNLOAD_FAILED_HTML_CONTENT", None
+            if len(content) >= MIN_FILE_SIZE: return path_written, content, None, None
+            else:
+                if os.path.exists(path_written): os.remove(path_written)
+                return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
+        except requests.exceptions.RequestException as e:
+            return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e) # Exception from Selenium's requests attempt
+        finally:
+            if 'content_buffer' in locals() and hasattr(content_buffer, 'closed') and not content_buffer.closed: content_buffer.close()
+        
+        return None, None, "DOWNLOAD_FAILED", None # All Selenium attempts failed without specific exception caught here
+    except Exception as e: # Broader Selenium operational error
+        return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
+    finally:
+        if driver: driver.quit()
+        if selenium_temp_dir and os.path.exists(selenium_temp_dir):
+            try: shutil.rmtree(selenium_temp_dir)
+            except Exception: pass
+
+def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
+    path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
+    if path_req and content_req: return path_req, content_req, None, None
+
+    path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
+    if path_sel and content_sel: return path_sel, content_sel, None, None
+
+    if error_sel == "SELENIUM_DRIVER_INIT_ERROR": return None, None, "SELENIUM_DRIVER_INIT_ERROR", detail_sel
     
-    # For other URLs, use the regular requests approach
-    return download_with_requests(url, folder_path, file_name)
+    if error_sel == "DOWNLOAD_FAILED_EXCEPTION": return None, None, error_sel, detail_sel
+    if error_req == "DOWNLOAD_FAILED_EXCEPTION": return None, None, error_req, detail_req
+    
+    final_error = error_sel if error_sel else error_req if error_req else "DOWNLOAD_FAILED"
+    final_detail = detail_sel if error_sel and error_sel.endswith("EXCEPTION") else detail_req if error_req and error_req.endswith("EXCEPTION") else None
+    return None, None, final_error, final_detail
 
+# --- Main Application Logic ---
+def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text_area):
+    file_contents_for_zip = {}; failed_downloads_details = []
+    filtered_links = [link for link in links if link['type'] in doc_types]
+    total_files_to_attempt = len(filtered_links)
+    if total_files_to_attempt == 0: return {}, []
+    progress_step = 1.0 / total_files_to_attempt
+    downloaded_successfully_count = 0; failed_count = 0
+    selenium_driver_init_error_shown = False
+    
+    for i, link_info in enumerate(filtered_links):
+        base_name_for_file = format_filename_base(link_info['date'], link_info['type'])
+        try:
+            temp_file_path, content_bytes, error_marker, error_detail = download_file_attempt(
+                link_info['url'], output_folder, base_name_for_file, link_info['type']
+            )
+            if temp_file_path and content_bytes:
+                filename_for_zip = os.path.basename(temp_file_path); counter = 1
+                name_part, ext_part = os.path.splitext(filename_for_zip)
+                while filename_for_zip in file_contents_for_zip:
+                    filename_for_zip = f"{name_part}_{counter}{ext_part}"; counter += 1
+                file_contents_for_zip[filename_for_zip] = content_bytes; downloaded_successfully_count += 1
+            else:
+                failed_count += 1
+                failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name_for_file, 'reason': error_marker, 'reason_detail': error_detail})
+                if error_marker == "SELENIUM_DRIVER_INIT_ERROR" and not selenium_driver_init_error_shown:
+                    st.error(f"Some files are not present at the source, so tool might fail. Please check the logs below")
+                    selenium_driver_init_error_shown = True
+            progress_bar.progress(min((i + 1) * progress_step, 1.0))
+            status_text_area.text(f"Processing: {i+1}/{total_files_to_attempt} | Downloaded: {downloaded_successfully_count} | Failed: {failed_count}")
+            time.sleep(random.uniform(0.1, 0.2))
+        except Exception as e:
+            failed_count += 1
+            failed_downloads_details.append({'url': link_info.get('url', 'N/A'), 'type': link_info.get('type', 'Unknown'), 'base_name': base_name_for_file, 'reason': "LOOP_PROCESSING_ERROR", 'reason_detail': str(e)})
+            progress_bar.progress(min((i + 1) * progress_step, 1.0))
+            status_text_area.text(f"Processing: {i+1}/{total_files_to_attempt} | Downloaded: {downloaded_successfully_count} | Failed: {failed_count}")
+    return file_contents_for_zip, failed_downloads_details
+
+def create_zip_in_memory(file_contents_dict):
+    if not file_contents_dict: return None
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_name, content in file_contents_dict.items(): zf.writestr(file_name, content)
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
 
 def main():
     try:
-        st.set_page_config(page_title="StockLib", page_icon="📚")
+        st.set_page_config(page_title="StockLib", page_icon="📚", layout="centered")
+        if 'show_about' not in st.session_state: st.session_state.show_about = False
         
-        # Initialize session state for About modal
-        if 'show_about' not in st.session_state:
-            st.session_state.show_about = False
-        
-        # Add About button and modal
-        with st.container():
-            # Create a right-aligned container for buttons
-            _, right_col = st.columns([3, 1])  # Adjusted ratio to give more space for buttons
-            with right_col:
-                if st.button("About", type="secondary", use_container_width=True):
-                    st.session_state.show_about = True
+        _, col_about_btn = st.columns([0.85, 0.15]) 
+        with col_about_btn:
+            if st.button("About", type="secondary", use_container_width=True, help="Information about StockLib"):
+                st.session_state.show_about = not st.session_state.show_about
+
+        st.markdown("<div style='text-align: center;'><h1 style='margin-bottom: 0.2em;'>StockLib 📚</h1><h4 style='color: #808080; margin-top: 0em; font-weight: normal;'>Your First Step in Fundamental Analysis – Your Business Data Library!</h4></div>", unsafe_allow_html=True)
+
+        if st.session_state.show_about:
+            with st.expander("About StockLib & Quick Guide", expanded=True):
+                st.markdown("**StockLib + NotebookLLM = Your AI-Powered Business Analyst**\n1. Enter stock ticker.\n2. Select document types.\n3. Click \"Fetch Documents\".\n4. Download ZIP.\n*Sourced via screener.in (BSE/NSE/company sites).*")
+            st.markdown("---")
+
+        with st.form(key='stock_form'):
+            st.markdown("---")
+            stock_name = st.text_input("Enter the stock name (BSE/NSE ticker):", placeholder="Example: TATAMOTORS")
+            st.markdown("### Select Document Types")
+            annual_reports_cb = st.checkbox("Annual Reports 📄", value=True, key="ar_cb")
+            transcripts_cb = st.checkbox("Concall Transcripts 📝", value=True, key="tr_cb")
+            ppts_cb = st.checkbox("Presentations 📊", value=True, key="ppt_cb")
+            submit_button = st.form_submit_button(label="🔍 Fetch Documents", use_container_width=True, type="primary")
+    
+        if submit_button and stock_name:
+            doc_types_selected = []
+            if annual_reports_cb: doc_types_selected.append("Annual_Report")
+            if transcripts_cb: doc_types_selected.append("Transcript")
+            if ppts_cb: doc_types_selected.append("PPT")
+            if not doc_types_selected: st.warning("Please select at least one document type."); st.stop()
             
-            if st.session_state.show_about:
-                # Use Streamlit's native components instead of custom HTML/CSS
-                st.subheader("About StockLib 📚")
-                st.caption("StockLib + NotebookLLM = Your AI-Powered Business Analyst")
+            sanitized_stock_name = stock_name.strip().upper()
+            with st.spinner(f"🔍 Searching documents for '{sanitized_stock_name}'..."):
+                html_content = get_webpage_content(sanitized_stock_name)
+                if not html_content: st.stop()
+                parsed_links = parse_html_content(html_content)
+                if not parsed_links: st.warning(f"No document links found on Screener for '{sanitized_stock_name}'."); st.stop()
+                links_to_download = [link for link in parsed_links if link['type'] in doc_types_selected]
+                if not links_to_download: st.warning(f"No documents of selected types ({', '.join(doc_types_selected)}) found for '{sanitized_stock_name}'."); st.stop()
+            st.success(f"Found {len(links_to_download)} documents for '{sanitized_stock_name}'. Preparing download...")
+            
+            with tempfile.TemporaryDirectory() as session_temp_dir:
+                progress_bar_area = st.empty(); status_text_area = st.empty()
+                progress_bar = progress_bar_area.progress(0)
+                status_text_area.text("Initializing downloads...")
                 
-                with st.expander("Quick Guide", expanded=True):
-                    st.markdown("""
-                    1. Enter stock name (Example: TATAMOTORS, HDFCBANK)
-                    2. Select documents you want to download
-                    3. Avoid the hassle of downloading documents one by one from screener
-                    4. Get your ZIP file with all documents in single click
-                    5. Upload these docs to NotebookLLM easily
-                    6. Ask questions like:
-                       - "What's the company's business model?"
-                       - "Explain their growth strategy"
-                       - "What are their key products?"
-                    7. Get instant insights from years of business data! 🚀
-                    """)
+                file_contents_dict, failed_docs = download_selected_documents(links_to_download, session_temp_dir, doc_types_selected, progress_bar, status_text_area)
                 
-                st.caption("Note: All documents belong to BSE/NSE/respective companies and are fetched from screener.in")
+                actual_downloaded_count = len(file_contents_dict); total_attempted_count = len(links_to_download)
+                progress_bar_area.empty()
+
+                if actual_downloaded_count > 0:
+                    final_status_msg = f"Download process complete. Successfully prepared {actual_downloaded_count}/{total_attempted_count} documents for ZIP. Scroll down to download the zip file."
+                    if failed_docs: final_status_msg += f" ({len(failed_docs)} failed)."
+                    status_text_area.success(final_status_msg)
+                    zip_data = create_zip_in_memory(file_contents_dict)
+                    if zip_data:
+                        st.download_button(label=f"📥 Download {actual_downloaded_count} Documents as ZIP ({sanitized_stock_name})", data=zip_data, file_name=f"{sanitized_stock_name}_documents.zip", mime="application/zip", use_container_width=True, type="primary")
                 
-                # Standard Streamlit close button
-                if st.button("Close", key="close_about_button"):
-                    st.session_state.show_about = False
-                    st.rerun()
-                    
-        # Improved header styling
-        st.markdown("""
-            <h1 style='text-align: center;'>StockLib 📚</h1>
-            <h4 style='text-align: center; color: #666666;'>Your First Step in Fundamental Analysis – Your Business Data Library!</h4>
-            <hr>
-        """, unsafe_allow_html=True)
-        
-        # Create a container for the main content
-        main_container = st.container()
-        
-        # Create a container for the footer
-        footer_container = st.container()
-        
-        with main_container:
-            # Add form with improved styling
-            with st.form(key='stock_form'):
-                stock_name = st.text_input("Enter the stock name (BSE/NSE ticker):", placeholder="Example: TATAMOTORS")
-                
-                st.markdown("### Select Document Types")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    annual_reports = st.checkbox("Annual Reports 📄", value=True)
-                with col2:
-                    transcripts = st.checkbox("Concall Transcripts 📝", value=True)
-                with col3:
-                    ppts = st.checkbox("Presentations 📊", value=True)
-                
-                submit_button = st.form_submit_button(label="🔍 Fetch Documents")
-        
-            # Process form submission
-            if submit_button and stock_name:
-                doc_types = []
-                if annual_reports:
-                    doc_types.append("Annual_Report")
-                if transcripts:
-                    doc_types.append("Transcript")
-                if ppts:
-                    doc_types.append("PPT")
-                
-                if not doc_types:
-                    st.warning("No document types selected.")
-                    return
-                
-                with st.spinner("🔍 Searching for documents..."):
-                    html_content = get_webpage_content(stock_name)
-                    
-                    if not html_content:
-                        return
-                    
-                    links = parse_html_content(html_content)
-                    
-                    if not links:
-                        st.warning(f"No documents found for {stock_name}.")
-                        return
-                    
-                    # Filter links by selected document types
-                    filtered_links = [link for link in links if link['type'] in doc_types]
-                    
-                    if not filtered_links:
-                        st.warning(f"No {', '.join(doc_types)} found for {stock_name}.")
-                        return
-                    
-                    # Display document count
-                    st.success(f"Found {len(filtered_links)} documents for {stock_name}!")
-                    
-                    # Create a temporary directory for downloads
-                    temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
-                    os.makedirs(temp_dir, exist_ok=True)
-                    
-                    # Create progress bar and status text
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    # Download documents
-                    successful_downloads, file_contents = download_selected_documents(
-                        filtered_links, temp_dir, doc_types, progress_bar, status_text
-                    )
-                    
-                    # Update status
-                    if successful_downloads:
-                        actual_count = len(successful_downloads)
-                        total_count = len(filtered_links)  # Define total_count here
-                        status_text.text(f"Successfully downloaded {actual_count}/{total_count} documents!")
-                        
-                        # Create ZIP file
-                        zip_data = create_zip_in_memory(file_contents)
-                        
-                        # Offer download button with accurate count
-                        st.download_button(
-                            label=f"📥 Download {actual_count} Documents (ZIP)",
-                            data=zip_data,
-                            file_name=f"{stock_name}_documents.zip",
-                            mime="application/zip",
-                            use_container_width=True
-                        )
-                        
-                        # Show warning if some downloads failed
-                        if actual_count < total_count:
-                            st.warning(f"{total_count - actual_count} documents could not be downloaded due to access restrictions or other errors.")
-                    else:
-                        status_text.text("No documents were successfully downloaded.")
-        
-        with footer_container:
-            st.markdown("""
-                <hr>
-                <p style='text-align: center; color: #888888; font-size: 0.8em;'>
-                    StockLib is a tool for educational purposes only. Not financial advice.
-                </p>
-            """, unsafe_allow_html=True)
+                if failed_docs:
+                    if actual_downloaded_count == 0: status_text_area.error(f"No documents downloaded out of {total_attempted_count} for '{sanitized_stock_name}'.")
+                    st.markdown("---"); st.subheader("⚠️ Download Failures Reported:")
+                    for failure in failed_docs:
+                        reason = failure.get('reason', 'Unknown Failure')
+                        detail = failure.get('reason_detail')
+                        msg = f"Could not download {failure['type']}: '{failure['base_name']}'."
+                        if reason == "SELENIUM_DRIVER_INIT_ERROR": msg += f" Affected by critical browser driver initialization failure." # Detail already shown by st.error
+                        elif reason == "DOWNLOAD_FAILED_EXCEPTION" or reason == "LOOP_PROCESSING_ERROR": msg += f" An error occurred: {detail if detail else 'Undetermined error'}."
+                        elif reason == "DOWNLOAD_FAILED_HTML_CONTENT": msg += " Received HTML page instead of the expected file."
+                        elif reason == "DOWNLOAD_FAILED_TOO_SMALL": msg += " Downloaded file was too small and considered invalid."
+                        elif reason and reason != "DOWNLOAD_FAILED": msg += f" Reason: {reason}."
+                        else: msg += " Download failed for an unspecified reason."
+                        msg += f" Source: [{failure['url']}]({failure['url']})"
+                        st.warning(msg)
+                elif actual_downloaded_count == 0 and total_attempted_count > 0:
+                    status_text_area.error(f"No documents were successfully downloaded out of {total_attempted_count} attempted for '{sanitized_stock_name}'.")
+
+        elif submit_button and not stock_name: st.error("Please enter a stock name.")
+
+        st.markdown("<hr style='margin-top: 2em; margin-bottom: 0.5em;'>", unsafe_allow_html=True)
+        st.caption("StockLib is a tool for educational purposes only.")
             
     except Exception as e:
-        st.error(f"Application error: {str(e)}")
-        st.info("Please try refreshing the page. If the problem persists, contact support.")
+        st.error(f"A critical application error occurred: {str(e)}. Please refresh and try again.")
+        # For server-side debugging, you might still want to log the full traceback
+        # import traceback
+        # print(f"CRITICAL APP ERROR: {e}\n{traceback.format_exc()}", file=sys.stderr)
+        # st.exception(e) # For UI traceback during development
 
-# Add these missing functions
-def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text):
-    os.makedirs(output_folder, exist_ok=True)
-    successful_downloads = []
-    file_contents = {}
-    
-    # Only count links that match the selected document types
-    filtered_links = [link for link in links if link['type'] in doc_types]
-    total_files = len(filtered_links)
-    
-    progress_step = 1.0 / total_files if total_files > 0 else 0
-    current_progress = 0.0
-    downloaded_count = 0
-    failed_count = 0
-    
-    for i, link in enumerate(filtered_links):
-        try:
-            file_name = format_filename(link['date'], link['type'])
-            
-            # Check if this filename already exists in our collection (avoid duplicates)
-            if file_name in file_contents:
-                # Modify filename to make it unique
-                base_name, ext = os.path.splitext(file_name)
-                file_name = f"{base_name}_{i}{ext}"
-                
-            file_path, content = download_pdf(link['url'], output_folder, file_name)
-            
-            if file_path and content and len(content) > 100:  # Ensure content is substantial
-                successful_downloads.append(file_path)
-                file_contents[file_name] = content
-                downloaded_count += 1
-            else:
-                failed_count += 1
-                st.warning(f"Failed to download {link['date']}_{link['type']}")
-            
-            current_progress += progress_step
-            progress_bar.progress(min(current_progress, 1.0))
-            status_text.text(f"Downloading: {downloaded_count}/{total_files} documents (Failed: {failed_count})")
-            time.sleep(1)
-        except Exception as e:
-            failed_count += 1
-            st.warning(f"Skipped {link['date']}_{link['type']}: {str(e)}")
-            current_progress += progress_step
-            progress_bar.progress(min(current_progress, 1.0))
-            continue
-
-    return successful_downloads, file_contents
-
-def create_zip_in_memory(file_contents):
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for file_name, content in file_contents.items():
-            zipf.writestr(file_name, content)
-    
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()  # Return the bytes directly
-
-# Add this at the end of the file to run the app
 if __name__ == "__main__":
     main()
