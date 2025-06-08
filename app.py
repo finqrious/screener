@@ -169,12 +169,14 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     try:
         chrome_options = Options()
 
-        # --- UPDATED SECTION FOR PRODUCTION (STREAMLIT CLOUD) ---
-        # When deploying, we use chromium-browser installed via packages.txt
-        # This makes the code work both locally (with default Chrome) and on the server (with Chromium).
-        if os.path.exists("/usr/bin/chromium-browser"):
+        # --- FINAL UPDATED SECTION FOR PRODUCTION (STREAMLIT CLOUD) ---
+        # Checks for the most common executable names for Chromium on Linux.
+        # This makes the code robust for different system configurations.
+        if os.path.exists("/usr/bin/chromium"):
+            chrome_options.binary_location = "/usr/bin/chromium"
+        elif os.path.exists("/usr/bin/chromium-browser"):
             chrome_options.binary_location = "/usr/bin/chromium-browser"
-        # -----------------------------------------------------------
+        # ---------------------------------------------------------------
 
         chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080"); chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}"); chrome_options.add_argument('--disable-extensions')
         selenium_temp_dir = tempfile.mkdtemp()
@@ -182,7 +184,7 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
         chrome_options.add_experimental_option("prefs", prefs)
         service = None
         try:
-            # For Streamlit Community Cloud, chromedriver is in the PATH after installing from packages.txt
+            # For Streamlit Community Cloud, chromedriver should be in the PATH after installing from packages.txt
             if os.path.exists("/home/appuser") or os.path.exists("/usr/bin/chromium-driver"):
                 service = Service()
             else: # For local development
