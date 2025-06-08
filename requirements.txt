@@ -1,7 +1,14 @@
-requests==2.31.0
-beautifulsoup4==4.12.2
-streamlit==1.29.0
-selenium==4.15.2        # Kept for scraping, but NOT for downloads
-webdriver-manager==4.0.1 # Kept for local testing
-lxml==4.9.3
-urllib3==2.1.0
+# For the web app framework
+streamlit
+
+# For making HTTP requests to download pages and files
+requests
+
+# For parsing HTML content from Screener
+beautifulsoup4
+
+# For browser automation (fallback for difficult downloads)
+selenium
+
+# For automatically managing the browser driver on local machines
+webdriver-manager
