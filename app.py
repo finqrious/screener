@@ -145,7 +145,13 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
         content = content_buffer.getvalue()
         if content.strip().startswith(b'<!DOCTYPE html') or content.strip().startswith(b'<html'):
              if os.path.exists(path_written): os.remove(path_written)
-             return None, None, "DOWNLOAD_FAILED_HTML_CONTENT", None
+             html_detail = "HTML page received. Could be a CAPTCHA or error page."
+             try:
+                soup = BeautifulSoup(content, 'html.parser')
+                if soup.title and soup.title.string:
+                    html_detail = f"HTML page with title: '{soup.title.string.strip()}'"
+             except: pass
+             return None, None, "DOWNLOAD_FAILED_HTML_CONTENT", html_detail
         if len(content) < MIN_FILE_SIZE:
             if os.path.exists(path_written): os.remove(path_written)
             return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
@@ -162,15 +168,25 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     driver = None; selenium_temp_dir = None; path_written = None
     try:
         chrome_options = Options()
+
+        # --- UPDATED SECTION FOR PRODUCTION (STREAMLIT CLOUD) ---
+        # When deploying, we use chromium-browser installed via packages.txt
+        # This makes the code work both locally (with default Chrome) and on the server (with Chromium).
+        if os.path.exists("/usr/bin/chromium-browser"):
+            chrome_options.binary_location = "/usr/bin/chromium-browser"
+        # -----------------------------------------------------------
+
         chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080"); chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}"); chrome_options.add_argument('--disable-extensions')
         selenium_temp_dir = tempfile.mkdtemp()
         prefs = {"download.default_directory": selenium_temp_dir, "download.prompt_for_download": False, "download.directory_upgrade": True, "plugins.always_open_pdf_externally": True}
         chrome_options.add_experimental_option("prefs", prefs)
         service = None
         try:
-            if os.path.exists("/home/appuser"): # Heuristic for Streamlit Community Cloud
-                service = Service() # Assumes chromedriver is in PATH via packages.txt
-            else: service = Service(ChromeDriverManager().install()) # Local
+            # For Streamlit Community Cloud, chromedriver is in the PATH after installing from packages.txt
+            if os.path.exists("/home/appuser") or os.path.exists("/usr/bin/chromium-driver"):
+                service = Service()
+            else: # For local development
+                service = Service(ChromeDriverManager().install())
             driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
         except Exception as driver_error: return None, None, "SELENIUM_DRIVER_INIT_ERROR", str(driver_error)
@@ -245,6 +261,7 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req: return path_req, content_req, None, None
+    st.write(f"Requests failed for {base_name_no_ext} ({detail_req}). Trying with browser automation...") # Add some debug info
     path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
     if path_sel and content_sel: return path_sel, content_sel, None, None
     if error_sel == "SELENIUM_DRIVER_INIT_ERROR": return None, None, "SELENIUM_DRIVER_INIT_ERROR", detail_sel
@@ -356,7 +373,7 @@ def main():
                         msg = f"Could not download {failure['type']}: '{failure['base_name']}'."
                         if reason == "SELENIUM_DRIVER_INIT_ERROR": msg += " Affected by critical browser driver initialization failure." # Detail already shown by st.error
                         elif reason.endswith("EXCEPTION") or reason == "LOOP_PROCESSING_ERROR": msg += f" An error occurred: {detail if detail else 'Undetermined error'}."
-                        elif reason == "DOWNLOAD_FAILED_HTML_CONTENT": msg += " Received HTML page instead of the expected file."
+                        elif reason == "DOWNLOAD_FAILED_HTML_CONTENT": msg += f" Received HTML page instead of file. {detail if detail else ''}"
                         elif reason == "DOWNLOAD_FAILED_TOO_SMALL": msg += " Downloaded file was too small and considered invalid."
                         elif reason and reason != "DOWNLOAD_FAILED": msg += f" Reason: {reason}."
                         else: msg += " Download failed for an unspecified reason."
