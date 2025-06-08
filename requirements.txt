@@ -1,7 +1,7 @@
 requests==2.31.0
 beautifulsoup4==4.12.2
 streamlit==1.29.0
-selenium==4.15.2
-webdriver-manager==4.0.1
+selenium==4.15.2        # Kept for scraping, but NOT for downloads
+webdriver-manager==4.0.1 # Kept for local testing
 lxml==4.9.3
-urllib3==2.1.0 
+urllib3==2.1.0
