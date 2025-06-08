@@ -13,7 +13,7 @@ import random
 # --- Global Constants ---
 MIN_FILE_SIZE = 1024
 REQUESTS_CONNECT_TIMEOUT = 15
-REQUESTS_READ_TIMEOUT = 180 # Increased for potentially slower proxying
+REQUESTS_READ_TIMEOUT = 180
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
@@ -30,14 +30,12 @@ def get_extension_from_response(response, url, doc_type_for_default):
             parsed_filename = urllib.parse.unquote(filenames[-1].strip('"'))
             _, ext = os.path.splitext(parsed_filename)
             if ext and 1 < len(ext) < 7: return ext.lower()
-    content_type = response.headers.get('Content-Type')
-    if content_type:
-        ct = content_type.split(';')[0].strip().lower()
-        mime_to_ext = {'application/pdf': '.pdf', 'application/vnd.ms-powerpoint': '.ppt', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx', 'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx', 'application/zip': '.zip', 'application/x-zip-compressed': '.zip', 'text/csv': '.csv'}
-        if ct in mime_to_ext: return mime_to_ext[ct]
+    content_type = response.headers.get('Content-Type', '').lower()
+    mime_to_ext = {'application/pdf': '.pdf', 'application/vnd.ms-powerpoint': '.ppt', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx', 'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx', 'application/zip': '.zip', 'application/x-zip-compressed': '.zip', 'text/csv': '.csv'}
+    if content_type.split(';')[0].strip() in mime_to_ext:
+        return mime_to_ext[content_type.split(';')[0].strip()]
     try:
-        parsed_url_path = urllib.parse.urlparse(url).path
-        _, ext_from_url = os.path.splitext(parsed_url_path)
+        _, ext_from_url = os.path.splitext(urllib.parse.urlparse(url).path)
         if ext_from_url and 1 < len(ext_from_url) < 7: return ext_from_url.lower()
     except Exception: pass
     return '.pptx' if doc_type_for_default == 'PPT' else '.pdf'
@@ -77,59 +75,57 @@ def parse_html_content(html_content):
                 if doc_type: all_links.append({'date': date_str, 'type': doc_type, 'url': link_tag['href']})
     return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
-# --- Robust Download Logic (Unchanged) ---
-def download_direct(url):
-    try:
-        headers = {"User-Agent": random.choice(USER_AGENTS)}
-        response = requests.get(url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, 60))
-        response.raise_for_status()
-        content_type = response.headers.get('Content-Type', '').lower()
-        if 'text/html' in content_type:
-            return None, "Got HTML instead of file"
-        return response, None
-    except requests.exceptions.RequestException as e:
-        return None, str(e)
-
-def download_via_google_proxy(url):
-    try:
-        encoded_url = urllib.parse.quote(url)
-        proxy_url = f"https://docs.google.com/gview?url={encoded_url}&embedded=true"
-        headers = {"User-Agent": random.choice(USER_AGENTS)}
-        response = requests.get(proxy_url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
-        response.raise_for_status()
-        return response, None
-    except requests.exceptions.RequestException as e:
-        return None, str(e)
-
+# --- NEW AND FINAL ROBUST DOWNLOAD LOGIC ---
 def download_file_attempt(url, base_name_no_ext, doc_type):
-    response, error = download_direct(url)
-    if not response:
-        # Don't show this info message by default, it clutters the UI
-        # st.info(f"Direct download for '{base_name_no_ext}' failed. Trying proxy...")
-        response, error = download_via_google_proxy(url)
+    session = requests.Session()
+    session.headers.update({"User-Agent": random.choice(USER_AGENTS)})
     
-    if not response:
-        return None, None, "DOWNLOAD_FAILED", f"All download methods failed. Last error: {error}"
+    urls_to_try = [url]
     
-    try:
-        content_buffer = io.BytesIO()
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk: content_buffer.write(chunk)
-        content = content_buffer.getvalue()
-        content_buffer.close()
+    # The BSE Direct Link Hack
+    if "bseindia.com" in url and "AnnPdfOpen.aspx" in url:
+        if pname_match := re.search(r'Pname=([^&]+)', url):
+            pname_value = pname_match.group(1)
+            # This is the direct attachment link format
+            alt_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pname_value}"
+            # We try the direct link first as it's more likely to succeed
+            urls_to_try.insert(0, alt_url)
 
-        if len(content) < MIN_FILE_SIZE:
-            return None, None, "DOWNLOAD_FAILED_TOO_SMALL", "File was too small to be valid."
-            
-        file_ext = get_extension_from_response(response, url, doc_type)
-        filename = base_name_no_ext + file_ext
-        return filename, content, None, None
-    except Exception as e:
-        return None, None, "PROCESSING_FAILED", f"Failed to process downloaded content: {e}"
-    finally:
-        if response: response.close()
+    last_error = ""
+    for i, attempt_url in enumerate(urls_to_try):
+        try:
+            # For BSE links, it's good practice to "warm up" the session
+            if "bseindia.com" in attempt_url:
+                session.get("https://www.bseindia.com/", timeout=REQUESTS_CONNECT_TIMEOUT)
+                time.sleep(0.5)
 
-# --- Main Application Logic (Unchanged) ---
+            response = session.get(attempt_url, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+            response.raise_for_status()
+
+            # Check if we got an HTML page instead of a file
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'text/html' in content_type:
+                last_error = "Server returned an HTML page instead of a file."
+                continue # Try the next URL if available
+
+            # Successfully got a non-HTML response, process it
+            content = response.content
+            if len(content) < MIN_FILE_SIZE:
+                last_error = "Downloaded file was too small to be valid."
+                continue # Try the next URL if available
+
+            file_ext = get_extension_from_response(response, attempt_url, doc_type)
+            filename = base_name_no_ext + file_ext
+            return filename, content, None, None
+
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+            continue # Try the next URL if available
+
+    # If all attempts failed
+    return None, None, "DOWNLOAD_FAILED", f"All methods failed. Last error: {last_error}"
+
+# --- Main Application Logic ---
 def download_selected_documents(links, doc_types, progress_bar, status_text_area):
     file_contents_for_zip = {}; failed_downloads_details = []
     links_to_download = [link for link in links if link['type'] in doc_types]
@@ -140,10 +136,12 @@ def download_selected_documents(links, doc_types, progress_bar, status_text_area
         base_name = format_filename_base(link_info['date'], link_info['type'])
         status_text_area.text(f"Downloading: {base_name} ({i+1}/{total_to_attempt})...")
         filename, content, error, detail = download_file_attempt(link_info['url'], base_name, link_info['type'])
+        
         if filename and content:
             file_contents_for_zip[filename] = content
         else:
             failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name, 'reason': error, 'reason_detail': detail})
+        
         progress_bar.progress((i + 1) / total_to_attempt)
         time.sleep(0.1)
     return file_contents_for_zip, failed_downloads_details
@@ -157,8 +155,6 @@ def create_zip_in_memory(file_contents_dict):
     return zip_buffer.getvalue()
 
 def main():
-    # --- CORRECTED STRUCTURE ---
-    # st.set_page_config must be the first Streamlit command and is NOT in a try block.
     st.set_page_config(page_title="StockLib", page_icon="📚", layout="centered")
 
     try:
@@ -209,7 +205,6 @@ def main():
                         st.caption(f"Source: {failure['url']}")
 
     except Exception as e:
-        # This will now safely catch errors from the rest of the app.
         st.error(f"A critical application error occurred: {e}")
 
 if __name__ == "__main__":
