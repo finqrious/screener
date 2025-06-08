@@ -12,3 +12,4 @@ selenium
 
 # For automatically managing the browser driver on local machines
 webdriver-manager
+selenium-stealth
