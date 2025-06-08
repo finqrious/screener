@@ -77,30 +77,23 @@ def parse_html_content(html_content):
                 if doc_type: all_links.append({'date': date_str, 'type': doc_type, 'url': link_tag['href']})
     return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
-# --- NEW ROBUST DOWNLOAD LOGIC ---
-
+# --- Robust Download Logic (Unchanged) ---
 def download_direct(url):
-    """Attempt 1: Download directly. This works for easy, non-protected sites."""
     try:
         headers = {"User-Agent": random.choice(USER_AGENTS)}
         response = requests.get(url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, 60))
         response.raise_for_status()
-        
-        # Check if we got an HTML page instead of a file
         content_type = response.headers.get('Content-Type', '').lower()
         if 'text/html' in content_type:
             return None, "Got HTML instead of file"
-            
         return response, None
     except requests.exceptions.RequestException as e:
         return None, str(e)
 
 def download_via_google_proxy(url):
-    """Attempt 2: Download via Google Docs Viewer proxy. This bypasses IP blocks."""
     try:
         encoded_url = urllib.parse.quote(url)
-        proxy_url = f"https://docs.google.com/gview?url={encoded_url}"
-        
+        proxy_url = f"https://docs.google.com/gview?url={encoded_url}&embedded=true"
         headers = {"User-Agent": random.choice(USER_AGENTS)}
         response = requests.get(proxy_url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
         response.raise_for_status()
@@ -109,25 +102,19 @@ def download_via_google_proxy(url):
         return None, str(e)
 
 def download_file_attempt(url, base_name_no_ext, doc_type):
-    """Tries direct download first, then falls back to the Google Proxy method."""
-    
-    # Attempt 1: Direct Download
     response, error = download_direct(url)
     if not response:
-        st.info(f"Direct download for '{base_name_no_ext}' failed ({error}). Trying proxy...")
-        # Attempt 2: Google Proxy Fallback
+        # Don't show this info message by default, it clutters the UI
+        # st.info(f"Direct download for '{base_name_no_ext}' failed. Trying proxy...")
         response, error = download_via_google_proxy(url)
     
     if not response:
         return None, None, "DOWNLOAD_FAILED", f"All download methods failed. Last error: {error}"
     
-    # If we have a successful response, process it
     try:
         content_buffer = io.BytesIO()
         for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                content_buffer.write(chunk)
-        
+            if chunk: content_buffer.write(chunk)
         content = content_buffer.getvalue()
         content_buffer.close()
 
@@ -137,14 +124,12 @@ def download_file_attempt(url, base_name_no_ext, doc_type):
         file_ext = get_extension_from_response(response, url, doc_type)
         filename = base_name_no_ext + file_ext
         return filename, content, None, None
-
     except Exception as e:
         return None, None, "PROCESSING_FAILED", f"Failed to process downloaded content: {e}"
     finally:
-        if response:
-            response.close()
+        if response: response.close()
 
-# --- Main Application Logic (Simplified) ---
+# --- Main Application Logic (Unchanged) ---
 def download_selected_documents(links, doc_types, progress_bar, status_text_area):
     file_contents_for_zip = {}; failed_downloads_details = []
     links_to_download = [link for link in links if link['type'] in doc_types]
@@ -154,75 +139,78 @@ def download_selected_documents(links, doc_types, progress_bar, status_text_area
     for i, link_info in enumerate(links_to_download):
         base_name = format_filename_base(link_info['date'], link_info['type'])
         status_text_area.text(f"Downloading: {base_name} ({i+1}/{total_to_attempt})...")
-
         filename, content, error, detail = download_file_attempt(link_info['url'], base_name, link_info['type'])
-        
         if filename and content:
             file_contents_for_zip[filename] = content
         else:
             failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name, 'reason': error, 'reason_detail': detail})
-        
         progress_bar.progress((i + 1) / total_to_attempt)
         time.sleep(0.1)
-        
     return file_contents_for_zip, failed_downloads_details
 
 def create_zip_in_memory(file_contents_dict):
     if not file_contents_dict: return None
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file_name, content in file_contents_dict.items():
-            zf.writestr(file_name, content)
+        for file_name, content in file_contents_dict.items(): zf.writestr(file_name, content)
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
 def main():
+    # --- CORRECTED STRUCTURE ---
+    # st.set_page_config must be the first Streamlit command and is NOT in a try block.
     st.set_page_config(page_title="StockLib", page_icon="📚", layout="centered")
-    st.markdown("<div style='text-align: center;'><h1 style='margin-bottom: 0.2em;'>StockLib 📚</h1><h4 style='color: #808080; margin-top: 0em; font-weight: normal;'>Your First Step in Fundamental Analysis</h4></div>", unsafe_allow_html=True)
 
-    with st.form(key='stock_form'):
-        stock_name = st.text_input("Enter stock ticker (e.g., TATAMOTORS):", key="stock_name")
-        st.markdown("##### Select Document Types")
-        col1, col2, col3 = st.columns(3)
-        with col1: annual_reports_cb = st.checkbox("Annual Reports 📄", value=True)
-        with col2: transcripts_cb = st.checkbox("Concall Transcripts 📝", value=True)
-        with col3: ppts_cb = st.checkbox("Presentations 📊", value=True)
-        submit_button = st.form_submit_button(label="🔍 Fetch & Download Documents", use_container_width=True, type="primary")
+    try:
+        st.markdown("<div style='text-align: center;'><h1 style='margin-bottom: 0.2em;'>StockLib 📚</h1><h4 style='color: #808080; margin-top: 0em; font-weight: normal;'>Your First Step in Fundamental Analysis</h4></div>", unsafe_allow_html=True)
 
-    if submit_button and stock_name:
-        doc_types = [dtype for flag, dtype in [(annual_reports_cb, "Annual_Report"), (transcripts_cb, "Transcript"), (ppts_cb, "PPT")] if flag]
-        if not doc_types:
-            st.warning("Please select at least one document type."); st.stop()
-        
-        sanitized_name = stock_name.strip().upper()
-        with st.spinner(f"🔍 Searching documents for '{sanitized_name}'..."):
-            html_content = get_webpage_content(sanitized_name)
-            if not html_content: st.stop()
-            parsed_links = parse_html_content(html_content)
-        
-        links_to_download = [link for link in parsed_links if link['type'] in doc_types]
-        if not links_to_download:
-            st.warning(f"No documents of the selected types found for '{sanitized_name}'."); st.stop()
+        with st.form(key='stock_form'):
+            stock_name = st.text_input("Enter stock ticker (e.g., TATAMOTORS):", key="stock_name")
+            st.markdown("##### Select Document Types")
+            col1, col2, col3 = st.columns(3)
+            with col1: annual_reports_cb = st.checkbox("Annual Reports 📄", value=True)
+            with col2: transcripts_cb = st.checkbox("Concall Transcripts 📝", value=True)
+            with col3: ppts_cb = st.checkbox("Presentations 📊", value=True)
+            submit_button = st.form_submit_button(label="🔍 Fetch & Download Documents", use_container_width=True, type="primary")
 
-        st.success(f"Found {len(links_to_download)} documents. Starting download...")
-        progress_bar_area = st.empty(); status_text_area = st.empty()
-        progress_bar = progress_bar_area.progress(0)
+        if submit_button and stock_name:
+            doc_types = [dtype for flag, dtype in [(annual_reports_cb, "Annual_Report"), (transcripts_cb, "Transcript"), (ppts_cb, "PPT")] if flag]
+            if not doc_types:
+                st.warning("Please select at least one document type."); st.stop()
+            
+            sanitized_name = stock_name.strip().upper()
+            with st.spinner(f"🔍 Searching documents for '{sanitized_name}'..."):
+                html_content = get_webpage_content(sanitized_name)
+                if not html_content: st.stop()
+                parsed_links = parse_html_content(html_content)
+            
+            links_to_download = [link for link in parsed_links if link['type'] in doc_types]
+            if not links_to_download:
+                st.warning(f"No documents of the selected types found for '{sanitized_name}'."); st.stop()
 
-        file_contents, failed_docs = download_selected_documents(links_to_download, doc_types, progress_bar, status_text_area)
-        
-        progress_bar_area.empty(); status_text_area.empty()
+            st.success(f"Found {len(links_to_download)} documents. Starting download...")
+            progress_bar_area = st.empty(); status_text_area = st.empty()
+            progress_bar = progress_bar_area.progress(0)
 
-        if file_contents:
-            st.success(f"Successfully downloaded {len(file_contents)} out of {len(links_to_download)} documents.")
-            zip_data = create_zip_in_memory(file_contents)
-            st.download_button(label=f"📥 Download {len(file_contents)} Documents as ZIP", data=zip_data, file_name=f"{sanitized_name}_documents.zip", mime="application/zip", use_container_width=True)
-        
-        if failed_docs:
-            st.error(f"Failed to download {len(failed_docs)} documents.")
-            with st.expander("View failed download details"):
-                for failure in failed_docs:
-                    st.warning(f"**{failure['base_name']}**: {failure.get('reason_detail', 'Unknown error')}")
-                    st.caption(f"Source: {failure['url']}")
+            file_contents, failed_docs = download_selected_documents(links_to_download, doc_types, progress_bar, status_text_area)
+            
+            progress_bar_area.empty(); status_text_area.empty()
+
+            if file_contents:
+                st.success(f"Successfully downloaded {len(file_contents)} out of {len(links_to_download)} documents.")
+                zip_data = create_zip_in_memory(file_contents)
+                st.download_button(label=f"📥 Download {len(file_contents)} Documents as ZIP", data=zip_data, file_name=f"{sanitized_name}_documents.zip", mime="application/zip", use_container_width=True)
+            
+            if failed_docs:
+                st.error(f"Failed to download {len(failed_docs)} documents.")
+                with st.expander("View failed download details"):
+                    for failure in failed_docs:
+                        st.warning(f"**{failure['base_name']}**: {failure.get('reason_detail', 'Unknown error')}")
+                        st.caption(f"Source: {failure['url']}")
+
+    except Exception as e:
+        # This will now safely catch errors from the rest of the app.
+        st.error(f"A critical application error occurred: {e}")
 
 if __name__ == "__main__":
     main()
