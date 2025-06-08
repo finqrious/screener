@@ -3,13 +3,3 @@ requests
 beautifulsoup4
 selenium
 webdriver-manager
-# Optional: if you intend to run in environments where Chromedriver is not pre-installed
-# and want to ensure it's fetched correctly. webdriver-manager handles this.
-
-# No specific versions are pinned, which means the latest compatible versions will be installed.
-# For production, it's often better to pin versions after testing, e.g.:
-# streamlit==1.20.0
-# requests==2.28.1
-# beautifulsoup4==4.11.1
-# selenium==4.8.0
-# webdriver-manager==3.8.5
