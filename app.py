@@ -158,58 +158,89 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
             try: os.remove(path_written)
             except OSError: pass
 
-# Replace this section in your download_with_selenium function:
 def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     driver = None; selenium_temp_dir = None; path_written = None
     try:
         chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
+        chrome_options.add_argument("--headless"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--window-size=1920,1080"); chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}"); chrome_options.add_argument('--disable-extensions')
         selenium_temp_dir = tempfile.mkdtemp()
-        prefs = {
-            "download.default_directory": selenium_temp_dir,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True
-        }
+        prefs = {"download.default_directory": selenium_temp_dir, "download.prompt_for_download": False, "download.directory_upgrade": True, "plugins.always_open_pdf_externally": True}
         chrome_options.add_experimental_option("prefs", prefs)
-        
         service = None
         try:
-            # Streamlit Cloud detection - multiple approaches
-            if (os.path.exists("/home/appuser") or 
-                os.path.exists("/app") or 
-                os.environ.get("STREAMLIT_CLOUD") or
-                "streamlit" in os.environ.get("HOME", "").lower()):
-                # Try chromium first on Streamlit Cloud
-                chrome_options.binary_location = "/usr/bin/chromium"
-                service = Service("/usr/bin/chromedriver")  # Try direct path first
-                try:
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-                except:
-                    # Fallback to default service
-                    service = Service()
-                    driver = webdriver.Chrome(service=service, options=chrome_options)
-            else:
-                # Local development
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-            
+            if os.path.exists("/home/appuser"): # Heuristic for Streamlit Community Cloud
+                service = Service() # Assumes chromedriver is in PATH via packages.txt
+            else: service = Service(ChromeDriverManager().install()) # Local
+            driver = webdriver.Chrome(service=service, options=chrome_options)
             driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
-        except Exception as driver_error:
-            return None, None, "SELENIUM_DRIVER_INIT_ERROR", str(driver_error)
+        except Exception as driver_error: return None, None, "SELENIUM_DRIVER_INIT_ERROR", str(driver_error)
 
-        # Rest of your selenium code remains the same...
-        # [Continue with the existing selenium logic]
+        if "bseindia.com" in url: driver.get("https://www.bseindia.com/"); time.sleep(random.uniform(1,2))
+        elif "nseindia.com" in url or "archives.nseindia.com" in url:
+            driver.get("https://www.nseindia.com/"); time.sleep(random.uniform(1,2))
+            driver.get("https://www.nseindia.com/companies-listing/corporate-filings-annual-reports"); time.sleep(random.uniform(1,2))
+        driver.get(url)
+        dl_temp_file_path = None; start_time = time.time()
+        while time.time() - start_time < SELENIUM_DOWNLOAD_WAIT_TIMEOUT:
+            completed_files = [f for f in os.listdir(selenium_temp_dir) if not f.endswith(('.crdownload', '.tmp', '.part'))]
+            if completed_files: dl_temp_file_path = os.path.join(selenium_temp_dir, sorted(completed_files, key=lambda f: os.path.getmtime(os.path.join(selenium_temp_dir, f)), reverse=True)[0]); break
+            time.sleep(1)
+        if dl_temp_file_path and os.path.exists(dl_temp_file_path):
+            _, original_ext = os.path.splitext(os.path.basename(dl_temp_file_path))
+            if not original_ext or not (1 < len(original_ext) < 7):
+                mock_response = type('Response', (), {'headers': {}, 'text': driver.page_source})()
+                original_ext = get_extension_from_response(mock_response, url, doc_type)
+            file_name_with_ext = base_name_no_ext + original_ext.lower()
+            path_written = os.path.join(folder_path, file_name_with_ext)
+            with open(dl_temp_file_path, 'rb') as f_src, open(path_written, 'wb') as f_dst: content_bytes = f_src.read(); f_dst.write(content_bytes)
+            try: os.remove(dl_temp_file_path)
+            except OSError: pass
+            if len(content_bytes) >= MIN_FILE_SIZE: return path_written, content_bytes, None, None
+            else:
+                if os.path.exists(path_written): os.remove(path_written)
+                path_written = None
+        if doc_type != 'PPT':
+            try:
+                if "application/pdf" in driver.page_source.lower() or driver.current_url.lower().endswith(".pdf"):
+                    b64_src = driver.execute_script("var e=document.querySelector('embed[type=\"application/pdf\"]'); if(e)return e.src; var i=document.querySelector('iframe'); if(i&&i.src&&i.src.startsWith('data:application/pdf'))return i.src; return null;")
+                    if b64_src and b64_src.startswith("data:application/pdf;base64,"):
+                        content_bytes = base64.b64decode(b64_src.split(",")[1])
+                        path_written = os.path.join(folder_path, base_name_no_ext + ".pdf")
+                        with open(path_written, 'wb') as f: f.write(content_bytes)
+                        if len(content_bytes) >= MIN_FILE_SIZE: return path_written, content_bytes, None, None
+                        else:
+                            if os.path.exists(path_written): os.remove(path_written)
+                            path_written = None
+            except Exception: pass
+        try:
+            cookies_dict = {c['name']: c['value'] for c in driver.get_cookies()}
+            sel_req_headers = {"User-Agent": random.choice(USER_AGENTS), "Accept": "application/pdf,text/html,*/*", "Referer": driver.current_url}
+            response = requests.get(url, headers=sel_req_headers, cookies=cookies_dict, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+            response.raise_for_status()
+            file_ext = get_extension_from_response(response, url, doc_type)
+            path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
+            content_buffer = io.BytesIO()
+            with open(path_written, 'wb') as f:
+                for chunk in response.iter_content(8192):
+                    if chunk: f.write(chunk); content_buffer.write(chunk)
+            content_bytes = content_buffer.getvalue(); content_buffer.close()
+            if content_bytes.strip().startswith(b'<!DOCTYPE html') or content_bytes.strip().startswith(b'<html'):
+                if os.path.exists(path_written): os.remove(path_written)
+                return None, None, "DOWNLOAD_FAILED_HTML_CONTENT", None
+            if len(content_bytes) >= MIN_FILE_SIZE: return path_written, content_bytes, None, None
+            else:
+                if os.path.exists(path_written): os.remove(path_written)
+                return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
+        except requests.exceptions.RequestException as e_req_cookie: return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL_COOKIE", str(e_req_cookie)
+        finally:
+            if 'content_buffer' in locals() and hasattr(content_buffer, 'closed') and not content_buffer.closed: content_buffer.close()
+        return None, None, "DOWNLOAD_FAILED", None
+    except Exception as e_sel_general: return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL_GENERAL", str(e_sel_general)
+    finally:
+        if driver: driver.quit()
+        if selenium_temp_dir and os.path.exists(selenium_temp_dir):
+            try: shutil.rmtree(selenium_temp_dir)
+            except Exception: pass
 
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
