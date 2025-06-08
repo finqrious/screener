@@ -6,10 +6,3 @@ requests
 
 # For parsing HTML content from Screener
 beautifulsoup4
-
-# For browser automation (fallback for difficult downloads)
-selenium
-
-# For automatically managing the browser driver on local machines
-webdriver-manager
-selenium-stealth
