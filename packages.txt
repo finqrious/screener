@@ -1,4 +1,3 @@
-# packages.txt
 google-chrome-stable
 chromium-chromedriver
-# Potentially other system libraries if needed by Chrome/Chromedriver
+
