@@ -1,1 +1,3 @@
 
+chromium-browser
+chromium-chromedriver
