@@ -7,13 +7,8 @@ import zipfile
 import time
 import urllib.parse
 import streamlit as st
-import base64
 import io
 import random
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 import tempfile
 import shutil
 
@@ -21,8 +16,6 @@ import shutil
 MIN_FILE_SIZE = 1024
 REQUESTS_CONNECT_TIMEOUT = 15
 REQUESTS_READ_TIMEOUT = 120
-SELENIUM_PAGE_LOAD_TIMEOUT = 300
-SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 300
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -155,15 +148,12 @@ def parse_html_content(html_content):
 
 # --- Enhanced BSE Annual Report Download ---
 def download_bse_annual_report_direct(url, folder_path, base_name_no_ext):
-    """Direct download for BSE annual reports without Selenium dependency"""
+    """Direct download for BSE annual reports without browser dependency"""
     try:
-        # Extract the PDF filename from BSE URL
         if "bseindia.com/bseplus/AnnualReport/" in url:
-            # Convert BSE annual report URL to direct PDF URL
             url_parts = url.split("/")
             if len(url_parts) >= 2:
                 pdf_filename = url_parts[-1]
-                # Try direct PDF access
                 direct_pdf_url = f"https://www.bseindia.com/bseplus/AnnualReport/{url_parts[-2]}/{pdf_filename}"
                 
                 headers = {
@@ -173,11 +163,9 @@ def download_bse_annual_report_direct(url, folder_path, base_name_no_ext):
                 }
                 
                 session = requests.Session()
-                # First visit BSE homepage to establish session
                 session.get("https://www.bseindia.com/", headers=headers, timeout=REQUESTS_CONNECT_TIMEOUT)
                 time.sleep(1)
                 
-                # Now try to download the PDF directly
                 response = session.get(direct_pdf_url, headers=headers, stream=True, 
                                      timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
                 response.raise_for_status()
@@ -227,13 +215,11 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
         response = None
         
         if "bseindia.com" in url:
-            # Establish session with BSE
             session.get("https://www.bseindia.com/", headers=current_headers, timeout=REQUESTS_CONNECT_TIMEOUT)
             time.sleep(random.uniform(0.5, 1.5))
             current_headers["Referer"] = "https://www.bseindia.com/"
             current_headers["Sec-Fetch-Site"] = "same-origin"
             
-            # Handle special BSE announcement URLs
             if "AnnPdfOpen.aspx" in url:
                 pname_match = re.search(r'Pname=([^&]+)', url)
                 if pname_match:
@@ -260,7 +246,6 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
                 response.raise_for_status()
         
         elif "nseindia.com" in url or "archives.nseindia.com" in url:
-            # Establish session with NSE
             nse_initial_headers = current_headers.copy()
             session.get("https://www.nseindia.com/", headers=nse_initial_headers, timeout=REQUESTS_CONNECT_TIMEOUT)
             time.sleep(random.uniform(0.5, 1.5))
@@ -317,161 +302,6 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
         if 'content_buffer' in locals() and hasattr(content_buffer, 'closed') and not content_buffer.closed:
             content_buffer.close()
 
-# --- Improved Selenium Download ---
-def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
-    driver = None
-    selenium_temp_dir = None
-    
-    try:
-        # Create a proper temp directory for downloads
-        selenium_temp_dir = tempfile.mkdtemp()
-        
-        # Enhanced Chrome options for Streamlit Cloud
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-plugins")
-        chrome_options.add_argument("--disable-images")
-        chrome_options.add_argument("--disable-web-security")
-        chrome_options.add_argument("--allow-running-insecure-content")
-        chrome_options.add_argument("--ignore-certificate-errors")
-        chrome_options.add_argument("--ignore-ssl-errors")
-        chrome_options.add_argument("--ignore-certificate-errors-spki-list")
-        chrome_options.add_argument("--ignore-certificate-errors-ssl-errors")
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        
-        # Set download preferences
-        prefs = {
-            "download.default_directory": selenium_temp_dir,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True,
-            "plugins.plugins_disabled": ["Chrome PDF Viewer"]
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
-        
-        # Try to initialize the driver with better error handling
-        try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        except Exception as e:
-            # Fallback: try with system chrome
-            chrome_options.add_argument("--remote-debugging-port=9222")
-            try:
-                driver = webdriver.Chrome(options=chrome_options)
-            except Exception as e2:
-                return None, None, "SELENIUM_DRIVER_INIT_ERROR", f"Primary: {str(e)}, Fallback: {str(e2)}"
-        
-        driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
-        driver.get(url)
-        time.sleep(3)
-        
-        # Check for direct file downloads
-        downloaded_files = []
-        for _ in range(10):  # Wait up to 10 seconds for download
-            downloaded_files = [f for f in os.listdir(selenium_temp_dir) 
-                              if not f.endswith('.crdownload')]
-            if downloaded_files:
-                break
-            time.sleep(1)
-        
-        if downloaded_files:
-            downloaded_file_path = os.path.join(selenium_temp_dir, downloaded_files[0])
-            with open(downloaded_file_path, 'rb') as f:
-                content_bytes = f.read()
-            
-            if len(content_bytes) >= MIN_FILE_SIZE:
-                file_ext = get_extension_from_response(None, downloaded_files[0], doc_type)
-                if not file_ext:
-                    file_ext = os.path.splitext(downloaded_files[0])[1] or '.pdf'
-                
-                path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
-                with open(path_written, 'wb') as f:
-                    f.write(content_bytes)
-                
-                return path_written, content_bytes, None, None
-        
-        # Try to extract embedded PDF content
-        if doc_type != 'PPT':
-            try:
-                if "application/pdf" in driver.page_source.lower() or driver.current_url.lower().endswith(".pdf"):
-                    b64_src = driver.execute_script("""
-                        var e=document.querySelector('embed[type="application/pdf"]'); 
-                        if(e)return e.src; 
-                        var i=document.querySelector('iframe'); 
-                        if(i&&i.src&&i.src.startsWith('data:application/pdf'))return i.src; 
-                        return null;
-                    """)
-                    if b64_src and b64_src.startswith("data:application/pdf;base64,"):
-                        content_bytes = base64.b64decode(b64_src.split(",")[1])
-                        path_written = os.path.join(folder_path, base_name_no_ext + ".pdf")
-                        with open(path_written, 'wb') as f:
-                            f.write(content_bytes)
-                        
-                        if len(content_bytes) >= MIN_FILE_SIZE:
-                            return path_written, content_bytes, None, None
-            except Exception:
-                pass
-        
-        # Fallback: try requests with selenium cookies
-        try:
-            cookies_dict = {c['name']: c['value'] for c in driver.get_cookies()}
-            sel_req_headers = {
-                "User-Agent": random.choice(USER_AGENTS),
-                "Accept": "application/pdf,text/html,*/*",
-                "Referer": driver.current_url
-            }
-            
-            response = requests.get(url, headers=sel_req_headers, cookies=cookies_dict, 
-                                  stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
-            response.raise_for_status()
-            
-            file_ext = get_extension_from_response(response, url, doc_type)
-            path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
-            content_buffer = io.BytesIO()
-            
-            with open(path_written, 'wb') as f:
-                for chunk in response.iter_content(8192):
-                    if chunk:
-                        f.write(chunk)
-                        content_buffer.write(chunk)
-            
-            content_bytes = content_buffer.getvalue()
-            content_buffer.close()
-            
-            if not content_bytes.strip().startswith(b'<!DOCTYPE') and len(content_bytes) >= MIN_FILE_SIZE:
-                return path_written, content_bytes, None, None
-            else:
-                if os.path.exists(path_written):
-                    os.remove(path_written)
-                return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
-        
-        except requests.exceptions.RequestException as e_req_cookie:
-            return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL_COOKIE", str(e_req_cookie)
-        finally:
-            if 'content_buffer' in locals() and hasattr(content_buffer, 'closed') and not content_buffer.closed:
-                content_buffer.close()
-        
-        return None, None, "DOWNLOAD_FAILED", None
-    
-    except Exception as e_sel_general:
-        return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL_GENERAL", str(e_sel_general)
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-        if selenium_temp_dir and os.path.exists(selenium_temp_dir):
-            try:
-                shutil.rmtree(selenium_temp_dir)
-            except:
-                pass
-
 # --- Main Download Logic ---
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     # Special handling for BSE annual reports
@@ -480,24 +310,13 @@ def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
         if path_bse and content_bse:
             return path_bse, content_bse, None, None
     
-    # Try regular requests method first
+    # Try regular requests method
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req:
         return path_req, content_req, None, None
     
-    # Use Selenium as fallback, but avoid for annual reports if requests failed
-    if doc_type != 'Annual_Report' or error_req != "DOWNLOAD_FAILED_HTML_RESPONSE":
-        path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
-        if path_sel and content_sel:
-            return path_sel, content_sel, None, None
-        
-        if error_sel == "SELENIUM_DRIVER_INIT_ERROR":
-            return None, None, "SELENIUM_DRIVER_INIT_ERROR", detail_sel
-        if error_sel and "EXCEPTION" in error_sel:
-            return None, None, error_sel, detail_sel
-    
     # Return the most relevant error
-    final_error = error_req if error_req else "DOWNLOAD_FAILED"
+    final_error = error_req or "DOWNLOAD_FAILED"
     final_detail = detail_req
     return None, None, final_error, final_detail
 
@@ -515,7 +334,6 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
     progress_step = 1.0 / total_files_to_attempt
     downloaded_successfully_count = 0
     failed_count = 0
-    selenium_driver_init_error_shown_this_run = False
     
     for i, link_info in enumerate(filtered_links):
         base_name_for_file = format_filename_base(link_info['date'], link_info['type'])
@@ -545,10 +363,6 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
                     'reason': error_marker,
                     'reason_detail': error_detail_str
                 })
-                
-                if error_marker == "SELENIUM_DRIVER_INIT_ERROR" and not selenium_driver_init_error_shown_this_run:
-                    st.error(f"Critical Setup Error: Could not initialize browser driver. Details: {error_detail_str}. Downloads requiring browser automation may fail.")
-                    selenium_driver_init_error_shown_this_run = True
             
             current_progress_val = min((i + 1) * progress_step, 1.0)
             progress_bar.progress(current_progress_val)
@@ -692,9 +506,7 @@ def main():
                                     st.markdown("### ⚠️ Download Failures Reported:")
                                     for failure in failed_downloads[:10]:  # Show first 10 failures
                                         reason_display = failure['reason'].replace('_', ' ').title()
-                                        if failure['reason'] == "SELENIUM_DRIVER_INIT_ERROR":
-                                            reason_display = "Affected by critical browser driver initialization failure"
-                                        elif "EXCEPTION" in failure['reason']:
+                                        if "EXCEPTION" in failure['reason']:
                                             reason_display = f"Technical error: {failure.get('reason_detail', 'Unknown error')}"
                                         
                                         st.error(f"Could not download {failure['type']}: '{failure['base_name']}'. {reason_display}. Source: {failure['url']}")
