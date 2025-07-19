@@ -148,47 +148,61 @@ def parse_html_content(html_content):
 
 # --- Enhanced BSE Annual Report Download ---
 def download_bse_annual_report_direct(url, folder_path, base_name_no_ext):
-    """Direct download for BSE annual reports without browser dependency"""
+    """Direct download for BSE annual reports using updated URL patterns"""
     try:
-        if "bseindia.com/bseplus/AnnualReport/" in url:
-            url_parts = url.split("/")
-            if len(url_parts) >= 2:
-                pdf_filename = url_parts[-1]
-                direct_pdf_url = f"https://www.bseindia.com/bseplus/AnnualReport/{url_parts[-2]}/{pdf_filename}"
-                
-                headers = {
-                    "User-Agent": random.choice(USER_AGENTS),
-                    "Accept": "application/pdf,*/*",
-                    "Referer": "https://www.bseindia.com/",
-                }
-                
-                session = requests.Session()
-                session.get("https://www.bseindia.com/", headers=headers, timeout=REQUESTS_CONNECT_TIMEOUT)
-                time.sleep(1)
-                
-                response = session.get(direct_pdf_url, headers=headers, stream=True, 
-                                     timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
-                response.raise_for_status()
-                
-                if response.headers.get('Content-Type', '').startswith('application/pdf'):
-                    file_path = os.path.join(folder_path, base_name_no_ext + ".pdf")
-                    content_buffer = io.BytesIO()
+        # Extract scrip code and file ID from old URL pattern
+        match = re.search(r'/(\d+)/(\d+).pdf', url)
+        if match:
+            scrip_code = match.group(1)
+            file_id = match.group(2).rstrip(scrip_code)  # Extract ID part
+
+            # New BSE patterns
+            possible_urls = [
+                f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{file_id}.pdf",
+                f"https://www.bseindia.com/xml-data/corpfiling/AttachHis/{file_id}.pdf",
+                f"https://www.bseindia.com/bseplus/AnnualReport/{scrip_code}/{file_id}{scrip_code}.pdf"  # Fallback to old
+            ]
+            
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Accept": "application/pdf,*/*",
+                "Referer": f"https://www.bseindia.com/stock-share-price/{scrip_code}.html",
+                "Sec-Fetch-Site": "same-origin"
+            }
+            
+            session = requests.Session()
+            session.get("https://www.bseindia.com/", headers=headers, timeout=REQUESTS_CONNECT_TIMEOUT)
+            time.sleep(1)
+            
+            for direct_url in possible_urls:
+                try:
+                    response = session.get(direct_url, headers=headers, stream=True, 
+                                         timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+                    response.raise_for_status()
                     
-                    with open(file_path, 'wb') as f:
-                        for chunk in response.iter_content(8192):
-                            if chunk:
-                                f.write(chunk)
-                                content_buffer.write(chunk)
-                    
-                    content_bytes = content_buffer.getvalue()
-                    content_buffer.close()
-                    
-                    if len(content_bytes) >= MIN_FILE_SIZE:
-                        return file_path, content_bytes, None, None
-                    else:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                        return None, None, "DOWNLOAD_FAILED_TOO_SMALL", None
+                    if response.headers.get('Content-Type', '').startswith('application/pdf'):
+                        file_path = os.path.join(folder_path, base_name_no_ext + ".pdf")
+                        content_buffer = io.BytesIO()
+                        
+                        with open(file_path, 'wb') as f:
+                            for chunk in response.iter_content(8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    content_buffer.write(chunk)
+                        
+                        content_bytes = content_buffer.getvalue()
+                        content_buffer.close()
+                        
+                        if len(content_bytes) >= MIN_FILE_SIZE:
+                            return file_path, content_bytes, None, None
+                        else:
+                            if os.path.exists(file_path):
+                                os.remove(file_path)
+                            continue  # Try next URL
+                except Exception:
+                    continue
+            
+            return None, None, "DOWNLOAD_FAILED_NO_VALID_URL", "No valid BSE URL found"
                         
     except Exception as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION_BSE_DIRECT", str(e)
@@ -305,7 +319,7 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
 # --- Main Download Logic ---
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
     # Special handling for BSE annual reports
-    if doc_type == 'Annual_Report' and "bseindia.com/bseplus/AnnualReport/" in url:
+    if doc_type == 'Annual_Report' and "bseindia.com" in url:
         path_bse, content_bse, error_bse, detail_bse = download_bse_annual_report_direct(url, folder_path, base_name_no_ext)
         if path_bse and content_bse:
             return path_bse, content_bse, None, None
