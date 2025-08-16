@@ -152,14 +152,14 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-        # Add the unique user data directory argument
+        # Add the unique user data directory argument to prevent session conflicts
         chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
 
         if os.path.exists("/home/appuser"):
             service = Service()
         else:
             service = Service(ChromeDriverManager().install())
-            
+
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
         driver.get(url)
@@ -176,19 +176,19 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
         with open(path_written, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk: f.write(chunk); content_buffer.write(chunk)
-        
+
         content = content_buffer.getvalue()
         if content.strip().startswith(b'<!DOCTYPE html') or len(content) < MIN_FILE_SIZE:
              if os.path.exists(path_written): os.remove(path_written)
              return None, None, "DOWNLOAD_FAILED_INVALID_CONTENT", "Selenium got HTML or small file."
-        
+
         return path_written, content, None, None
     except Exception as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL", str(e)
     finally:
         if driver:
             driver.quit()
-        # Clean up the temporary user data directory
+        # Clean up the unique temporary user data directory
         if user_data_dir and os.path.exists(user_data_dir):
             shutil.rmtree(user_data_dir)
 # <<< END OF MODIFIED FUNCTION >>>
@@ -235,7 +235,21 @@ def create_zip_in_memory(file_contents_dict):
 st.markdown("""<h1 style='text-align: center;'>StockLib 📚</h1><p style='text-align: center; color: #bbb;'>Your First Step in Fundamental Analysis – Your Business Data Library!</p>""", unsafe_allow_html=True)
 st.markdown("---")
 with st.expander("About StockLib & Quick Guide"):
-    st.markdown("""**StockLib + NotebookLLM = Your AI-powered business analyst.**...""")
+    st.markdown("""
+    **StockLib + NotebookLLM = Your AI-powered business analyst.**
+
+    StockLib helps you gather public company documents (annual reports, presentation decks, and concall transcripts), package them, and quickly analyze them with NotebookLLM. It's designed for investors, analysts, and students who want an organized, searchable library of company disclosures.
+
+    - **What it fetches:** Annual reports, earning transcripts, investor presentations.
+    - **Why it helps:** Saves time, creates a single ZIP, and enables fast LLM-based analysis.
+
+    **How to use:**
+    1. Enter the stock ticker (BSE/NSE).
+    2. Choose which document types to fetch.
+    3. Click "Fetch Documents" and wait for the ZIP file.
+
+    *Sources: screener.in, official company investor relations pages, and public filings.*
+    """)
 with st.form(key='stock_form'):
     stock_name = st.text_input("Enter the stock name (BSE/NSE ticker):", placeholder="Example: TATAMOTORS", key="stock_name_input")
     st.markdown("<label>Select Document Types:</label>", unsafe_allow_html=True)
