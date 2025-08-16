@@ -138,32 +138,30 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
     except requests.exceptions.RequestException as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
 
-# <<< MODIFIED FUNCTION >>>
+# <<< FINAL MODIFIED FUNCTION >>>
 def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     driver = None
-    user_data_dir = None
     try:
-        # Create a unique temporary directory for the user data
-        user_data_dir = tempfile.mkdtemp()
-
         chrome_options = Options()
+        # These are the crucial arguments for running in a constrained cloud environment
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-        # Add the unique user data directory argument to prevent session conflicts
-        chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
-
-        if os.path.exists("/home/appuser"):
+        chrome_options.add_argument("--window-size=1920x1080")
+        # We remove the custom user-data-dir to let Selenium handle it automatically and cleanly
+        
+        # This part correctly handles both local (with webdriver-manager) and cloud (native)
+        if os.path.exists("/home/appuser"): # Streamlit cloud environment
             service = Service()
         else:
             service = Service(ChromeDriverManager().install())
 
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
+        
         driver.get(url)
-        time.sleep(5)
+        time.sleep(5) # Give the page time to load any dynamic content
 
         cookies = {c['name']: c['value'] for c in driver.get_cookies()}
         response = requests.get(driver.current_url, headers={"User-Agent": random.choice(USER_AGENTS)}, cookies=cookies, stream=True)
@@ -188,9 +186,6 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     finally:
         if driver:
             driver.quit()
-        # Clean up the unique temporary user data directory
-        if user_data_dir and os.path.exists(user_data_dir):
-            shutil.rmtree(user_data_dir)
 # <<< END OF MODIFIED FUNCTION >>>
 
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
