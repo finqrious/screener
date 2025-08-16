@@ -1,297 +1,340 @@
-# app.py
-import os, re, time, io, zipfile, base64, random, tempfile, shutil, urllib.parse
-from datetime import datetime
-from typing import Dict, List, Tuple, Optional
-
+import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import streamlit as st
+import re
+from datetime import datetime
+import os
+import zipfile
+import time
+import urllib.parse
+import base64
+import io
+import random
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+import tempfile
+import shutil
 
-# ------------------------------------------------------------------------------
-# CONSTANTS
-# ------------------------------------------------------------------------------
-MIN_FILE_SIZE               = 1024
-REQ_CONNECT_TO, REQ_READ_TO = 15, 120
-SELENIUM_LOAD, SELENIUM_DL  = 300, 300
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="StockLib",
+    page_icon="📚",
+    layout="centered"
+)
+
+# --- Global Constants ---
+MIN_FILE_SIZE = 1024
+REQUESTS_CONNECT_TIMEOUT = 15
+REQUESTS_READ_TIMEOUT = 300
+SELENIUM_PAGE_LOAD_TIMEOUT = 300
+SELENIUM_DOWNLOAD_WAIT_TIMEOUT = 300
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Safari/537.36"
 ]
 
-# ------------------------------------------------------------------------------
-# UTILS
-# ------------------------------------------------------------------------------
-def get_extension(r: requests.Response, url: str, default: str) -> str:
-    cd = r.headers.get("Content-Disposition")
-    if cd:
-        fn = re.findall(r'filename\*?=(?:UTF-\d+\'\')?([^;\s"]+)', cd, re.I)
-        if fn:
-            _, ext = os.path.splitext(urllib.parse.unquote(fn[-1].strip('"')))
-            if 1 < len(ext) < 7:
+# --- Core Backend Functions (Copied from Flask app) ---
+
+def get_extension_from_response(response, url, doc_type_for_default):
+    content_disposition = response.headers.get('Content-Disposition')
+    if content_disposition:
+        filenames = re.findall(r'filename\*?=(?:UTF-\d{1,2}\'\'|")?([^";\s]+)', content_disposition, re.IGNORECASE)
+        if filenames:
+            parsed_filename = urllib.parse.unquote(filenames[-1].strip('"'))
+            _, ext = os.path.splitext(parsed_filename)
+            if ext and 1 < len(ext) < 7:
                 return ext.lower()
-
-    ct = r.headers.get("Content-Type", "").split(";")[0].strip().lower()
-    MIME = {
-        "application/pdf": ".pdf",
-        "application/vnd.ms-powerpoint": ".ppt",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-        "application/msword": ".doc",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-        "application/zip": ".zip",
-        "text/csv": ".csv",
-    }
-    if ct in MIME:
-        return MIME[ct]
-
+    content_type = response.headers.get('Content-Type')
+    if content_type:
+        ct = content_type.split(';')[0].strip().lower()
+        mime_to_ext = {
+            'application/pdf': '.pdf', 'application/vnd.ms-powerpoint': '.ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+            'application/msword': '.doc', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+            'application/zip': '.zip', 'application/x-zip-compressed': '.zip', 'text/csv': '.csv',
+        }
+        if ct in mime_to_ext: return mime_to_ext[ct]
     try:
-        _, ext = os.path.splitext(urllib.parse.urlparse(url).path)
-        if 1 < len(ext) < 7:
-            return ext.lower()
-    except Exception:
-        pass
+        parsed_url_path = urllib.parse.urlparse(url).path
+        _, ext_from_url = os.path.splitext(parsed_url_path)
+        if ext_from_url and 1 < len(ext_from_url) < 7: return ext_from_url.lower()
+    except Exception: pass
+    return '.pptx' if doc_type_for_default == 'PPT' else '.pdf'
 
-    return { "PPT": ".pptx", "Transcript": ".pdf" }.get(default, ".pdf")
+def format_filename_base(date_str, doc_type):
+    if re.match(r'^\d{4}$', date_str): return f"{date_str}_{doc_type}"
+    if re.match(r'^\d{4}-\d{2}$', date_str):
+        year, month = date_str.split('-')
+        return f"{year}_{month}_{doc_type}"
+    if re.match(r'^\d{2}/\d{2}/\d{4}$', date_str):
+        day, month, year = date_str.split('/')
+        return f"{year}_{month}_{day}_{doc_type}"
+    clean_date = re.sub(r'[^\w\.-]', '_', date_str)
+    return f"{clean_date}_{doc_type}"
 
-
-def clean_filename(date_str: str, doc_type: str) -> str:
-    for pat, fmt in [
-        (r"^\d{4}$", "{}_{}"),
-        (r"^\d{4}-\d{2}$", "{}_{}"),
-        (r"^\d{2}/\d{2}/\d{4}$", "{}_{}"),
-    ]:
-        if re.match(pat, date_str):
-            return fmt.format(date_str.replace("-", "_").replace("/", "_"), doc_type)
-    return f"{re.sub(r'[^\\w.-]', '_', date_str)}_{doc_type}"
-
-# ------------------------------------------------------------------------------
-# SCRAPER
-# ------------------------------------------------------------------------------
-def fetch_links(ticker: str) -> List[Dict]:
-    url = f"https://www.screener.in/company/{ticker}/consolidated/#documents"
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+def get_webpage_content(stock_name):
+    url = f"https://www.screener.in/company/{stock_name}/consolidated/#documents"
     try:
-        r = requests.get(url, headers=headers, timeout=REQ_CONNECT_TO)
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        if e.response.status_code == 404:
-            st.error(f"Stock '{ticker}' not found on Screener.")
-        else:
-            st.error(f"HTTP {e.response.status_code} while fetching screener page.")
-        return []
-    except Exception as e:
-        st.error(f"Network error: {e}")
-        return []
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        response = requests.get(url, headers=headers, timeout=REQUESTS_CONNECT_TIMEOUT)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.HTTPError as e:
+        return {"error": f"Stock '{stock_name}' not found. Check ticker."} if e.response.status_code == 404 else {"error": f"HTTP error for '{stock_name}'. Status: {e.response.status_code}."}
+    except requests.exceptions.ConnectionError: return {"error": f"Connection error for '{stock_name}'. Check internet."}
+    except requests.exceptions.Timeout: return {"error": f"Timeout fetching page for '{stock_name}'. Server slow."}
+    except requests.exceptions.RequestException as e: return {"error": f"Error fetching data for '{stock_name}': {str(e)}."}
 
-    soup = BeautifulSoup(r.text, "lxml")
-    results = []
-
-    # Annual reports
-    for a in soup.select(".annual-reports a"):
-        m = re.search(r"Financial Year (\d{4})", a.text)
-        if m:
-            results.append({"date": m.group(1), "type": "Annual_Report", "url": a["href"]})
-
+def parse_html_content(html_content):
+    if not html_content: return []
+    soup = BeautifulSoup(html_content, 'html.parser')
+    all_links = []
+    # Annual Reports
+    for link in soup.select('.annual-reports ul.list-links li a'):
+        if (year_match := re.search(r'Financial Year (\d{4})', link.text.strip())):
+            all_links.append({'date': year_match.group(1), 'type': 'Annual_Report', 'url': link['href']})
     # Concalls
-    for li in soup.select(".concalls li"):
-        date_div = li.select_one(".ink-600")
-        if not date_div:
-            continue
-        date_str = date_div.get_text(strip=True)
-        try:
-            date_str = datetime.strptime(date_str, "%b %Y").strftime("%Y-%m")
-        except ValueError:
-            pass
-        for a in li.select("a"):
-            if "Transcript" in a.text:
-                results.append({"date": date_str, "type": "Transcript", "url": a["href"]})
-            elif "PPT" in a.text:
-                results.append({"date": date_str, "type": "PPT", "url": a["href"]})
+    for item in soup.select('.concalls ul.list-links li'):
+        if (date_div := item.select_one('.ink-600.font-size-15')):
+            date_text = date_div.text.strip()
+            try: date_str = datetime.strptime(date_text, '%b %Y').strftime('%Y-%m')
+            except ValueError: date_str = date_text
+            for link_tag in item.find_all('a', class_='concall-link'):
+                if 'Transcript' in link_tag.text: all_links.append({'date': date_str, 'type': 'Transcript', 'url': link_tag['href']})
+                elif 'PPT' in link_tag.text: all_links.append({'date': date_str, 'type': 'PPT', 'url': link_tag['href']})
+    return sorted(all_links, key=lambda x: x['date'], reverse=True)
 
-    return sorted(results, key=lambda x: x["date"], reverse=True)
-
-# ------------------------------------------------------------------------------
-# DOWNLOADER (requests only – selenium kept for fall-back)
-# ------------------------------------------------------------------------------
-def bse_cdn_fallback_url(old_url: str) -> Optional[str]:
-    """
-    Convert legacy /bseplus/AnnualReport/<scrip>/<fname> to new CDN URL.
-    Returns None if url is not a legacy annual-report link.
-    """
-    m = re.match(r".*/bseindia\.com/bseplus/AnnualReport/\d+/(.+\.pdf)$", old_url)
-    if not m:
-        return None
-    return f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{m.group(1)}"
-
-def download_once(url: str, path_no_ext: str, doc_type: str, session: requests.Session) -> Tuple[Optional[str], Optional[bytes], str]:
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
+def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
     try:
-        r = session.get(url, headers=headers, stream=True, timeout=(REQ_CONNECT_TO, REQ_READ_TO))
-        r.raise_for_status()
-    except Exception as e:
-        return None, None, str(e)
+        session = requests.Session()
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        response = session.get(url, headers=headers, stream=True, timeout=(REQUESTS_CONNECT_TIMEOUT, REQUESTS_READ_TIMEOUT))
+        response.raise_for_status()
+        
+        file_ext = get_extension_from_response(response, url, doc_type)
+        path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
+        content_buffer = io.BytesIO()
+        
+        with open(path_written, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk: f.write(chunk); content_buffer.write(chunk)
+        
+        content = content_buffer.getvalue()
+        if content.strip().startswith(b'<!DOCTYPE html') or len(content) < MIN_FILE_SIZE:
+            if os.path.exists(path_written): os.remove(path_written)
+            return None, None, "DOWNLOAD_FAILED_INVALID_CONTENT", "File was HTML or too small."
+        
+        return path_written, content, None, None
+    except requests.exceptions.RequestException as e:
+        return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
 
-    ext = get_extension(r, url, doc_type)
-    full_path = path_no_ext + ext
-    content = io.BytesIO()
-    for chunk in r.iter_content(8192):
-        if chunk:
-            content.write(chunk)
-    data = content.getvalue()
-    if data.startswith(b"<!DOCTYPE") or len(data) < MIN_FILE_SIZE:
-        return None, None, "small or html"
-
-    with open(full_path, "wb") as f:
-        f.write(data)
-    return full_path, data, ""
-
-def download_with_retry(link: Dict, folder: str) -> Tuple[Optional[str], Optional[bytes], str]:
-    base = clean_filename(link["date"], link["type"])
-    session = requests.Session()
-
-    # 1st attempt – original URL
-    path, data, err = download_once(link["url"], os.path.join(folder, base), link["type"], session)
-    if path:
-        return path, data, ""
-
-    # legacy BSE annual report? try CDN fallback
-    cdn = bse_cdn_fallback_url(link["url"])
-    if cdn:
-        path, data, err = download_once(cdn, os.path.join(folder, base), link["type"], session)
-        if path:
-            return path, data, ""
-
-    # Selenium fallback (kept for non-BSE or other quirks)
-    return selenium_fallback(link, folder, base)
-
-def selenium_fallback(link: Dict, folder: str, base: str) -> Tuple[Optional[str], Optional[bytes], str]:
-    chrome_opts = Options()
-    chrome_opts.add_argument("--headless=new")
-    chrome_opts.add_argument("--no-sandbox")
-    chrome_opts.add_argument("--disable-dev-shm-usage")
-    chrome_opts.add_argument("--window-size=1920,1080")
-    chrome_opts.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
-
-    tmp_dir = tempfile.mkdtemp()
-    prefs = {
-        "download.default_directory": tmp_dir,
-        "download.prompt_for_download": False,
-        "plugins.always_open_pdf_externally": True,
-    }
-    chrome_opts.add_experimental_option("prefs", prefs)
-
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_opts)
-    driver.set_page_load_timeout(SELENIUM_LOAD)
-
+def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
+    driver = None
     try:
-        driver.get(link["url"])
-        deadline = time.time() + SELENIUM_DL
-        while time.time() < deadline:
-            done = [f for f in os.listdir(tmp_dir) if not f.endswith((".crdownload", ".tmp"))]
-            if done:
-                tmp_path = os.path.join(tmp_dir, done[0])
-                with open(tmp_path, "rb") as f:
-                    data = f.read()
-                if len(data) >= MIN_FILE_SIZE:
-                    ext = os.path.splitext(done[0])[1] or get_extension(
-                        type("", (), {"headers": {}})(), link["url"], link["type"]
-                    )
-                    final_path = os.path.join(folder, base + ext)
-                    shutil.move(tmp_path, final_path)
-                    return final_path, data, ""
-                break
-            time.sleep(1)
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument(f"--user-agent={random.choice(USER_AGENTS)}")
+        
+        # Heuristic for Streamlit Community Cloud vs. Local
+        if os.path.exists("/home/appuser"):
+            service = Service() # Assumes chromedriver is in PATH (standard on Streamlit Cloud)
+        else:
+            service = Service(ChromeDriverManager().install())
+            
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
+        driver.get(url)
+        time.sleep(5) # Allow time for potential JS redirects or rendering
+
+        # Attempt to get content via requests using Selenium's cookies
+        cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+        response = requests.get(driver.current_url, headers={"User-Agent": random.choice(USER_AGENTS)}, cookies=cookies, stream=True)
+        response.raise_for_status()
+
+        file_ext = get_extension_from_response(response, driver.current_url, doc_type)
+        path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
+        content_buffer = io.BytesIO()
+
+        with open(path_written, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk: f.write(chunk); content_buffer.write(chunk)
+        
+        content = content_buffer.getvalue()
+        if content.strip().startswith(b'<!DOCTYPE html') or len(content) < MIN_FILE_SIZE:
+             if os.path.exists(path_written): os.remove(path_written)
+             return None, None, "DOWNLOAD_FAILED_INVALID_CONTENT", "Selenium got HTML or small file."
+        
+        return path_written, content, None, None
     except Exception as e:
-        return None, None, str(e)
+        return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL", str(e)
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        driver.quit()
-    return None, None, "selenium could not resolve"
+        if driver: driver.quit()
 
-# ------------------------------------------------------------------------------
-# ZIP
-# ------------------------------------------------------------------------------
-def zip_files(contents: Dict[str, bytes]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, data in contents.items():
-            z.writestr(name, data)
-    buf.seek(0)
-    return buf.getvalue()
+def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
+    path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
+    if path_req and content_req: return path_req, content_req, None, None
+    
+    path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
+    if path_sel and content_sel: return path_sel, content_sel, None, None
+    
+    return None, None, error_sel or error_req or "DOWNLOAD_FAILED", detail_sel or detail_req
 
-# ------------------------------------------------------------------------------
-# STREAMLIT UI
-# ------------------------------------------------------------------------------
-def main():
-    st.set_page_config("StockLib 📚", layout="centered")
-    st.markdown(
-        "<h1 style='text-align:center;'>StockLib 📚</h1>"
-        "<h4 style='text-align:center;color:grey;font-weight:normal'>"
-        "Your First Step in Fundamental Analysis – Your Business Data Library!</h4>",
-        unsafe_allow_html=True,
+# Modified to accept Streamlit UI elements for live updates
+def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text):
+    file_contents_for_zip = {}
+    failed_downloads_details = []
+    filtered_links = [link for link in links if link['type'] in doc_types]
+    total_to_download = len(filtered_links)
+
+    for i, link_info in enumerate(filtered_links):
+        base_name = format_filename_base(link_info['date'], link_info['type'])
+        status_text.text(f"Downloading {i+1}/{total_to_download}: {base_name}...")
+        
+        try:
+            path, content, error, detail = download_file_attempt(link_info['url'], output_folder, base_name, link_info['type'])
+            if path and content:
+                filename_for_zip = os.path.basename(path)
+                file_contents_for_zip[filename_for_zip] = content
+            else:
+                failed_downloads_details.append({'url': link_info['url'], 'type': link_info['type'], 'base_name': base_name, 'reason': error, 'reason_detail': detail})
+        except Exception as e:
+            failed_downloads_details.append({'url': link_info.get('url', 'N/A'), 'type': link_info.get('type', 'Unknown'), 'base_name': base_name, 'reason': "LOOP_ERROR", 'reason_detail': str(e)})
+        
+        progress_bar.progress((i + 1) / total_to_download)
+        time.sleep(random.uniform(0.1, 0.3)) # Small delay
+    
+    status_text.text("All downloads attempted.")
+    return file_contents_for_zip, failed_downloads_details
+
+def create_zip_in_memory(file_contents_dict):
+    if not file_contents_dict: return None
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_name, content in file_contents_dict.items():
+            zf.writestr(file_name, content)
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+# --- Streamlit UI ---
+
+# Header
+st.markdown("""
+    <h1 style='text-align: center;'>StockLib 📚</h1>
+    <p style='text-align: center; color: #bbb;'>Your First Step in Fundamental Analysis – Your Business Data Library!</p>
+    """, unsafe_allow_html=True)
+st.markdown("---")
+
+# About Section
+with st.expander("About StockLib & Quick Guide"):
+    st.markdown("""
+    **StockLib + NotebookLLM = Your AI-powered business analyst.**
+
+    StockLib helps you gather public company documents (annual reports, presentation decks, and concall transcripts), package them, and quickly analyze them with NotebookLLM. It's designed for investors, analysts, and students who want an organized, searchable library of company disclosures.
+
+    - **What it fetches:** Annual reports, earning transcripts, investor presentations.
+    - **Why it helps:** Saves time, creates a single ZIP, and enables fast LLM-based analysis.
+
+    **How to use:**
+    1. Enter the stock ticker (BSE/NSE).
+    2. Choose which document types to fetch.
+    3. Click "Fetch Documents" and wait for the ZIP file.
+    
+    *Sources: screener.in, official company investor relations pages, and public filings.*
+    """)
+
+# Main Form
+with st.form(key='stock_form'):
+    stock_name = st.text_input(
+        "Enter the stock name (BSE/NSE ticker):",
+        placeholder="Example: TATAMOTORS",
+        key="stock_name_input"
     )
+    
+    st.markdown("<label>Select Document Types:</label>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        get_annual_reports = st.checkbox("Annual Reports 📄", value=True)
+    with col2:
+        get_transcripts = st.checkbox("Concall Transcripts 📝", value=True)
+    with col3:
+        get_ppts = st.checkbox("Presentations 📊", value=True)
+        
+    submit_button = st.form_submit_button(label="🔍 Fetch Documents")
 
-    with st.form("form"):
-        ticker = st.text_input("Enter stock ticker (BSE / NSE):", placeholder="e.g. TATAMOTORS").strip().upper()
-        ar = st.checkbox("Annual Reports 📄", True)
-        tr = st.checkbox("Concall Transcripts 📝", True)
-        ppt = st.checkbox("Presentations 📊", True)
-        submitted = st.form_submit_button("🔍 Fetch Documents", use_container_width=True, type="primary")
+# Processing Logic
+if submit_button:
+    stock_name = stock_name.strip().upper()
+    doc_types = []
+    if get_annual_reports: doc_types.append("Annual_Report")
+    if get_transcripts: doc_types.append("Transcript")
+    if get_ppts: doc_types.append("PPT")
 
-    if submitted:
-        if not ticker:
-            st.error("Please enter a ticker."); st.stop()
-        types = []
-        if ar: types.append("Annual_Report")
-        if tr: types.append("Transcript")
-        if ppt: types.append("PPT")
-        if not types:
-            st.warning("Select at least one document type."); st.stop()
-
-        with st.spinner(f"Searching documents for {ticker}…"):
-            links = fetch_links(ticker)
-            links = [l for l in links if l["type"] in types]
-            if not links:
-                st.warning("No documents found."); st.stop()
-
-        st.success(f"Found {len(links)} documents – starting download…")
-        with tempfile.TemporaryDirectory() as tmp:
-            progress = st.progress(0)
-            status = st.empty()
-            ok, fail = 0, 0
-            contents = {}
-            for idx, link in enumerate(links, 1):
-                path, data, err = download_with_retry(link, tmp)
-                if path:
-                    name = os.path.basename(path)
-                    counter = 1
-                    while name in contents:
-                        name = f"{os.path.splitext(name)[0]}_{counter}{os.path.splitext(name)[1]}"
-                        counter += 1
-                    contents[name] = data
-                    ok += 1
+    if not stock_name:
+        st.error("❌ Please enter a stock name.")
+    elif not doc_types:
+        st.warning("⚠️ Please select at least one document type.")
+    else:
+        with st.spinner(f"Searching for documents for '{stock_name}'..."):
+            html_result = get_webpage_content(stock_name)
+            if isinstance(html_result, dict) and "error" in html_result:
+                st.error(f"❌ {html_result['error']}")
+            else:
+                links = parse_html_content(html_result)
+                links_to_download = [link for link in links if link['type'] in doc_types]
+                
+                if not links_to_download:
+                    st.warning(f"📭 No documents of the selected types found for '{stock_name}'.")
                 else:
-                    fail += 1
-                progress.progress(idx / len(links))
-                status.text(f"Downloaded {ok} | Failed {fail}")
-            progress.empty()
-            if contents:
-                zip_data = zip_files(contents)
-                st.download_button(
-                    label=f"📥 Download {ok} documents ({ticker}).zip",
-                    data=zip_data,
-                    file_name=f"{ticker}_documents.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                    type="primary",
-                )
-            if fail:
-                st.warning(f"{fail} documents could not be downloaded.")
+                    st.info(f"Found {len(links_to_download)} documents to download.")
+                    
+                    # UI elements for progress
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        # Start the download process
+                        file_contents, failed_docs = download_selected_documents(
+                            links_to_download, temp_dir, doc_types, progress_bar, status_text
+                        )
 
-if __name__ == "__main__":
-    main()
+                    # Process results
+                    if file_contents:
+                        st.success(f"✅ Successfully downloaded {len(file_contents)}/{len(links_to_download)} documents!")
+                        
+                        zip_data = create_zip_in_memory(file_contents)
+                        if zip_data:
+                            st.download_button(
+                                label="📥 Download Documents as ZIP",
+                                data=zip_data,
+                                file_name=f"{stock_name}_documents.zip",
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                        else:
+                            st.error("Failed to create ZIP file.")
+                            
+                        if failed_docs:
+                            with st.expander(f"⚠️ View {len(failed_docs)} Download Failures"):
+                                for failure in failed_docs:
+                                    st.error(f"**{failure['base_name']}** ({failure['type']})")
+                                    st.caption(f"Reason: {failure.get('reason', 'Unknown')} - {failure.get('reason_detail', 'No detail')}")
+                                    st.caption(f"URL: {failure['url']}")
+
+                    else:
+                        st.error(f"❌ No documents were successfully downloaded out of {len(links_to_download)} attempted for '{stock_name}'.")
+                        if failed_docs:
+                            with st.expander("View All Download Failures"):
+                                for failure in failed_docs:
+                                    st.error(f"**{failure['base_name']}** ({failure['type']})")
+                                    st.caption(f"Reason: {failure.get('reason', 'Unknown')} - {failure.get('reason_detail', 'No detail')}")
+                                    st.caption(f"URL: {failure['url']}")
+# Footer
+st.markdown("---")
+st.markdown("<p style='text-align: center; color: #6c757d; font-size: 14px;'>StockLib is a tool for educational purposes only. Not financial advice.</p>", unsafe_allow_html=True)
