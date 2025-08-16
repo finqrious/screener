@@ -138,7 +138,7 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
     except requests.exceptions.RequestException as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
 
-# <<< FINAL MODIFIED FUNCTION >>>
+# <<< MODIFIED FUNCTION WITH FIX >>>
 def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     driver = None
     try:
@@ -153,35 +153,39 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
         
-        if os.path.exists("/home/appuser"): # Streamlit cloud environment
-            service = Service()
-        else: # Local environment
-            service = Service(ChromeDriverManager().install())
+        # Fix: Use a unique temporary user data directory to avoid conflicts in cloud env
+        with tempfile.TemporaryDirectory() as user_data_dir:
+            chrome_options.add_argument(f"--user-data-dir={user_data_dir}")
+            
+            if os.path.exists("/home/appuser"): # Streamlit cloud environment
+                service = Service()
+            else: # Local environment
+                service = Service(ChromeDriverManager().install())
 
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
-        
-        driver.get(url)
-        time.sleep(5)
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
+            
+            driver.get(url)
+            time.sleep(5)
 
-        cookies = {c['name']: c['value'] for c in driver.get_cookies()}
-        response = requests.get(driver.current_url, headers={"User-Agent": random.choice(USER_AGENTS)}, cookies=cookies, stream=True)
-        response.raise_for_status()
+            cookies = {c['name']: c['value'] for c in driver.get_cookies()}
+            response = requests.get(driver.current_url, headers={"User-Agent": random.choice(USER_AGENTS)}, cookies=cookies, stream=True)
+            response.raise_for_status()
 
-        file_ext = get_extension_from_response(response, driver.current_url, doc_type)
-        path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
-        content_buffer = io.BytesIO()
+            file_ext = get_extension_from_response(response, driver.current_url, doc_type)
+            path_written = os.path.join(folder_path, base_name_no_ext + file_ext)
+            content_buffer = io.BytesIO()
 
-        with open(path_written, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk: f.write(chunk); content_buffer.write(chunk)
+            with open(path_written, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk: f.write(chunk); content_buffer.write(chunk)
 
-        content = content_buffer.getvalue()
-        if content.strip().startswith(b'<!DOCTYPE html') or len(content) < MIN_FILE_SIZE:
-             if os.path.exists(path_written): os.remove(path_written)
-             return None, None, "DOWNLOAD_FAILED_INVALID_CONTENT", "Selenium got HTML or small file."
+            content = content_buffer.getvalue()
+            if content.strip().startswith(b'<!DOCTYPE html') or len(content) < MIN_FILE_SIZE:
+                 if os.path.exists(path_written): os.remove(path_written)
+                 return None, None, "DOWNLOAD_FAILED_INVALID_CONTENT", "Selenium got HTML or small file."
 
-        return path_written, content, None, None
+            return path_written, content, None, None
     except Exception as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL", str(e)
     finally:
