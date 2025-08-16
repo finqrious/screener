@@ -138,35 +138,41 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
     except requests.exceptions.RequestException as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
 
-# <<< FIXED FUNCTION >>>
-def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
-    driver = None
+# <<< MODIFIED FOR HACK: Accept existing driver for reuse >>>
+def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=None):
+    created_driver = False
     temp_user_data_dir = None
+    if driver is None:
+        # Fallback to creating a new one if not passed (but in hack, we pass one)
+        created_driver = True
+        driver = None
+        try:
+            temp_user_data_dir = tempfile.mkdtemp()
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+            chrome_options.add_argument(f"--user-data-dir={temp_user_data_dir}")
+            
+            if os.path.exists("/home/appuser"):
+                service = Service()
+            else:
+                service = Service(ChromeDriverManager().install())
+
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+            driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
+        except Exception as e:
+            return None, None, "DRIVER_CREATION_FAILED", str(e)
+
     try:
-        temp_user_data_dir = tempfile.mkdtemp()
-        chrome_options = Options()
-        # These are the standard "best practice" arguments for running Selenium in a cloud/Docker environment
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
-        chrome_options.add_argument(f"--user-data-dir={temp_user_data_dir}")
-        
-        if os.path.exists("/home/appuser"): # Streamlit cloud environment
-            service = Service()
-        else: # Local environment
-            service = Service(ChromeDriverManager().install())
-
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
-        
         driver.get(url)
-        time.sleep(10)  # Increased sleep for stability in loading
-
+        time.sleep(10)  # Increased for stability
+        
         cookies = {c['name']: c['value'] for c in driver.get_cookies()}
         response = requests.get(driver.current_url, headers={"User-Agent": random.choice(USER_AGENTS)}, cookies=cookies, stream=True)
         response.raise_for_status()
@@ -188,20 +194,22 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     except Exception as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION_SEL", str(e)
     finally:
-        if driver:
+        if created_driver and driver:
             driver.quit()
         if temp_user_data_dir and os.path.exists(temp_user_data_dir):
             shutil.rmtree(temp_user_data_dir, ignore_errors=True)
-# <<< END OF FIXED FUNCTION >>>
+# <<< END OF MODIFIED FUNCTION >>>
 
-def download_file_attempt(url, folder_path, base_name_no_ext, doc_type):
+# <<< MODIFIED TO ACCEPT DRIVER >>>
+def download_file_attempt(url, folder_path, base_name_no_ext, doc_type, driver=None):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req: return path_req, content_req, None, None
-    path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type)
+    path_sel, content_sel, error_sel, detail_sel = download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver)
     if path_sel and content_sel: return path_sel, content_sel, None, None
     return None, None, error_sel or error_req or "DOWNLOAD_FAILED", detail_sel or detail_req
 
-def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text):
+# <<< MODIFIED TO ACCEPT DRIVER >>>
+def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text, driver=None):
     file_contents_for_zip = {}
     failed_downloads_details = []
     filtered_links = [link for link in links if link['type'] in doc_types]
@@ -210,7 +218,7 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
         base_name = format_filename_base(link_info['date'], link_info['type'])
         status_text.text(f"Downloading {i+1}/{total_to_download}: {base_name}...")
         try:
-            path, content, error, detail = download_file_attempt(link_info['url'], output_folder, base_name, link_info['type'])
+            path, content, error, detail = download_file_attempt(link_info['url'], output_folder, base_name, link_info['type'], driver)
             if path and content:
                 filename_for_zip = os.path.basename(path)
                 file_contents_for_zip[filename_for_zip] = content
@@ -219,7 +227,7 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
         except Exception as e:
             failed_downloads_details.append({'url': link_info.get('url', 'N/A'), 'type': link_info.get('type', 'Unknown'), 'base_name': base_name, 'reason': "LOOP_ERROR", 'reason_detail': str(e)})
         progress_bar.progress((i + 1) / total_to_download)
-        time.sleep(random.uniform(0.1, 0.3))
+        time.sleep(random.uniform(0.5, 1.5))  # Increased delay for stability
     status_text.text("All downloads attempted.")
     return file_contents_for_zip, failed_downloads_details
 
@@ -281,8 +289,41 @@ if submit_button:
                     st.info(f"Found {len(links_to_download)} documents to download.")
                     progress_bar = st.progress(0)
                     status_text = st.empty()
+                    driver = None
+                    temp_user_data_dir = None
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        file_contents, failed_docs = download_selected_documents(links_to_download, temp_dir, doc_types, progress_bar, status_text)
+                        # <<< HACK: Create single reusable driver here >>>
+                        try:
+                            temp_user_data_dir = tempfile.mkdtemp()
+                            chrome_options = Options()
+                            chrome_options.add_argument("--headless")
+                            chrome_options.add_argument("--no-sandbox")
+                            chrome_options.add_argument("--disable-gpu")
+                            chrome_options.add_argument("--disable-dev-shm-usage")
+                            chrome_options.add_argument("--window-size=1920,1080")
+                            chrome_options.add_argument("--disable-extensions")
+                            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+                            chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+                            chrome_options.add_argument(f"--user-data-dir={temp_user_data_dir}")
+                            
+                            if os.path.exists("/home/appuser"):
+                                service = Service()
+                            else:
+                                service = Service(ChromeDriverManager().install())
+
+                            driver = webdriver.Chrome(service=service, options=chrome_options)
+                            driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
+
+                            file_contents, failed_docs = download_selected_documents(links_to_download, temp_dir, doc_types, progress_bar, status_text, driver)
+                        except Exception as e:
+                            st.error(f"Driver creation failed: {str(e)}")
+                        finally:
+                            if driver:
+                                driver.quit()
+                            if temp_user_data_dir and os.path.exists(temp_user_data_dir):
+                                shutil.rmtree(temp_user_data_dir, ignore_errors=True)
+                        # <<< END OF HACK >>>
+
                     if file_contents:
                         st.success(f"✅ Successfully downloaded {len(file_contents)}/{len(links_to_download)} documents!")
                         zip_data = create_zip_in_memory(file_contents)
