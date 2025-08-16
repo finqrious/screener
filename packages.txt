@@ -1,12 +1,2 @@
-zlib1g-dev
-libjpeg-dev
-libglib2.0-0
-libnss3
-libgconf-2-4
-libfontconfig1
-libx11-6
-libxext6
-libxss1
-libxrandr2
-libxtst6
-libasound2
+chromium
+chromium-driver
