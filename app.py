@@ -138,7 +138,7 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
     except requests.exceptions.RequestException as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
 
-# <<< MODIFIED FUNCTION: Removed --user-data-dir to avoid conflicts; added cloud-specific paths >>>
+# <<< UPDATED FOR CLOUD: No Service in cloud, no webdriver_manager >>>
 def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=None):
     created_driver = False
     if driver is None:
@@ -154,15 +154,13 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=
             chrome_options.add_argument("--disable-extensions")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
-            # Hack: No --user-data-dir to avoid the 'already in use' error
             
-            if os.path.exists("/home/appuser"):  # Streamlit cloud environment
-                chrome_options.binary_location = "/usr/bin/chromium-browser"
-                service = Service("/usr/bin/chromium-driver")
-            else:  # Local environment
+            if os.path.exists("/home/appuser"):  # Streamlit cloud: Use system-installed chromedriver
+                driver = webdriver.Chrome(options=chrome_options)  # No Service; relies on PATH
+            else:  # Local: Use webdriver_manager
                 service = Service(ChromeDriverManager().install())
-
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            
             driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
         except Exception as e:
             return None, None, "DRIVER_CREATION_FAILED", str(e)
@@ -195,7 +193,6 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=
         if created_driver and driver:
             driver.quit()
 
-# <<< MODIFIED TO ACCEPT DRIVER >>>
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type, driver=None):
     path_req, content_req, error_req, detail_req = download_with_requests(url, folder_path, base_name_no_ext, doc_type)
     if path_req and content_req: return path_req, content_req, None, None
@@ -203,7 +200,6 @@ def download_file_attempt(url, folder_path, base_name_no_ext, doc_type, driver=N
     if path_sel and content_sel: return path_sel, content_sel, None, None
     return None, None, error_sel or error_req or "DOWNLOAD_FAILED", detail_sel or detail_req
 
-# <<< MODIFIED TO ACCEPT DRIVER >>>
 def download_selected_documents(links, output_folder, doc_types, progress_bar, status_text, driver=None):
     file_contents_for_zip = {}
     failed_downloads_details = []
@@ -285,9 +281,9 @@ if submit_button:
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     driver = None
-                    file_contents = {}  # Hack: Define here to avoid NameError if driver fails
+                    file_contents = {}  # Define to avoid NameError
+                    failed_docs = []  # Define to avoid NameError
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        # <<< HACK: Create single reusable driver here, without user-data-dir >>>
                         try:
                             chrome_options = Options()
                             chrome_options.add_argument("--headless")
@@ -299,22 +295,21 @@ if submit_button:
                             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
                             chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
                             
-                            if os.path.exists("/home/appuser"):
-                                chrome_options.binary_location = "/usr/bin/chromium-browser"
-                                service = Service("/usr/bin/chromium-driver")
-                            else:
+                            if os.path.exists("/home/appuser"):  # Streamlit cloud
+                                driver = webdriver.Chrome(options=chrome_options)  # No Service
+                            else:  # Local
                                 service = Service(ChromeDriverManager().install())
+                                driver = webdriver.Chrome(service=service, options=chrome_options)
 
-                            driver = webdriver.Chrome(service=service, options=chrome_options)
                             driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
 
                             file_contents, failed_docs = download_selected_documents(links_to_download, temp_dir, doc_types, progress_bar, status_text, driver)
                         except Exception as e:
                             st.error(f"Driver creation failed: {str(e)}")
+                            failed_docs = []  # Ensure defined
                         finally:
                             if driver:
                                 driver.quit()
-                        # <<< END OF HACK >>>
 
                     if file_contents:
                         st.success(f"✅ Successfully downloaded {len(file_contents)}/{len(links_to_download)} documents!")
