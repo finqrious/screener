@@ -138,16 +138,13 @@ def download_with_requests(url, folder_path, base_name_no_ext, doc_type):
     except requests.exceptions.RequestException as e:
         return None, None, "DOWNLOAD_FAILED_EXCEPTION", str(e)
 
-# <<< MODIFIED FOR HACK: Accept existing driver for reuse >>>
+# <<< MODIFIED FUNCTION: Removed --user-data-dir to avoid conflicts; added cloud-specific paths >>>
 def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=None):
     created_driver = False
-    temp_user_data_dir = None
     if driver is None:
-        # Fallback to creating a new one if not passed (but in hack, we pass one)
         created_driver = True
         driver = None
         try:
-            temp_user_data_dir = tempfile.mkdtemp()
             chrome_options = Options()
             chrome_options.add_argument("--headless")
             chrome_options.add_argument("--no-sandbox")
@@ -157,11 +154,12 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=
             chrome_options.add_argument("--disable-extensions")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
             chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
-            chrome_options.add_argument(f"--user-data-dir={temp_user_data_dir}")
+            # Hack: No --user-data-dir to avoid the 'already in use' error
             
-            if os.path.exists("/home/appuser"):
-                service = Service()
-            else:
+            if os.path.exists("/home/appuser"):  # Streamlit cloud environment
+                chrome_options.binary_location = "/usr/bin/chromium-browser"
+                service = Service("/usr/bin/chromium-driver")
+            else:  # Local environment
                 service = Service(ChromeDriverManager().install())
 
             driver = webdriver.Chrome(service=service, options=chrome_options)
@@ -196,9 +194,6 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type, driver=
     finally:
         if created_driver and driver:
             driver.quit()
-        if temp_user_data_dir and os.path.exists(temp_user_data_dir):
-            shutil.rmtree(temp_user_data_dir, ignore_errors=True)
-# <<< END OF MODIFIED FUNCTION >>>
 
 # <<< MODIFIED TO ACCEPT DRIVER >>>
 def download_file_attempt(url, folder_path, base_name_no_ext, doc_type, driver=None):
@@ -227,7 +222,7 @@ def download_selected_documents(links, output_folder, doc_types, progress_bar, s
         except Exception as e:
             failed_downloads_details.append({'url': link_info.get('url', 'N/A'), 'type': link_info.get('type', 'Unknown'), 'base_name': base_name, 'reason': "LOOP_ERROR", 'reason_detail': str(e)})
         progress_bar.progress((i + 1) / total_to_download)
-        time.sleep(random.uniform(0.5, 1.5))  # Increased delay for stability
+        time.sleep(random.uniform(0.5, 1.0))  # Increased delay for cloud stability
     status_text.text("All downloads attempted.")
     return file_contents_for_zip, failed_downloads_details
 
@@ -290,11 +285,10 @@ if submit_button:
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     driver = None
-                    temp_user_data_dir = None
+                    file_contents = {}  # Hack: Define here to avoid NameError if driver fails
                     with tempfile.TemporaryDirectory() as temp_dir:
-                        # <<< HACK: Create single reusable driver here >>>
+                        # <<< HACK: Create single reusable driver here, without user-data-dir >>>
                         try:
-                            temp_user_data_dir = tempfile.mkdtemp()
                             chrome_options = Options()
                             chrome_options.add_argument("--headless")
                             chrome_options.add_argument("--no-sandbox")
@@ -304,10 +298,10 @@ if submit_button:
                             chrome_options.add_argument("--disable-extensions")
                             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
                             chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
-                            chrome_options.add_argument(f"--user-data-dir={temp_user_data_dir}")
                             
                             if os.path.exists("/home/appuser"):
-                                service = Service()
+                                chrome_options.binary_location = "/usr/bin/chromium-browser"
+                                service = Service("/usr/bin/chromium-driver")
                             else:
                                 service = Service(ChromeDriverManager().install())
 
@@ -320,8 +314,6 @@ if submit_button:
                         finally:
                             if driver:
                                 driver.quit()
-                            if temp_user_data_dir and os.path.exists(temp_user_data_dir):
-                                shutil.rmtree(temp_user_data_dir, ignore_errors=True)
                         # <<< END OF HACK >>>
 
                     if file_contents:
