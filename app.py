@@ -143,25 +143,26 @@ def download_with_selenium(url, folder_path, base_name_no_ext, doc_type):
     driver = None
     try:
         chrome_options = Options()
-        # These are the crucial arguments for running in a constrained cloud environment
+        # These are the standard "best practice" arguments for running Selenium in a cloud/Docker environment
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920x1080")
-        # We remove the custom user-data-dir to let Selenium handle it automatically and cleanly
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
         
-        # This part correctly handles both local (with webdriver-manager) and cloud (native)
         if os.path.exists("/home/appuser"): # Streamlit cloud environment
             service = Service()
-        else:
+        else: # Local environment
             service = Service(ChromeDriverManager().install())
 
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(SELENIUM_PAGE_LOAD_TIMEOUT)
         
         driver.get(url)
-        time.sleep(5) # Give the page time to load any dynamic content
+        time.sleep(5)
 
         cookies = {c['name']: c['value'] for c in driver.get_cookies()}
         response = requests.get(driver.current_url, headers={"User-Agent": random.choice(USER_AGENTS)}, cookies=cookies, stream=True)
